@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package agent; 
+
+option go_package = "voice-runtime/orchestrator-go/generated;agent";
+
+service VoiceAgent {
+    // bidirectional stream 
+    rpc StreamEvents(stream Event) returns (stream Event);
+}
+
+message Event {
+    string session_id = 1;
+
+    oneof payload {
+        AudioChunk audio = 2;
+        Transcript transcript = 3; 
+        ControlSignal control = 4;
+    }
+}
+
+message AudioChunk {
+    bytes data = 1;
+}
+
+message Transcript {
+    string text = 1;
+    bool is_final = 2;
+}
+
+message ControlSignal {
+    enum SignalType {
+        START_SESSION = 0; 
+        END_SESSION = 1; 
+        BARGE_IN = 2;   // user interrupts
+    }
+
+    SignalType type = 1;
+}
