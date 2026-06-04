@@ -1,33 +1,40 @@
 import time
-import logging 
+import logging
 import ollama
 
-class LLMEngine: 
-    def __init__(self, model_name="qwen2.5:3b"):
-        self.model_name = model_name
-        logging.info(f"LLM Engine initiated, with {self.model_name}")
+logger = logging.getLogger("InferenceEngine.LLM")
 
-    def generate_stream(self, system_prompt: str, user_text: str):
-        ## enhancement: eventually move this prompt to the agent profile configs
+class LLMEngine:
+    def __init__(self, model_target: str = "qwen2.5:3b"):
+        self.model_target = model_target
+        self._verify_local_presence()
 
-        message = [
-            {
-                "role": "system",
-                "content": system_prompt
-            }, 
-            {
-                "role": "user", 
-                "content": user_text
-            }
+    def _verify_local_presence(self):
+        logger.info(f"Checking availability of underlying model runtime targets: '{self.model_target}'")
+        try:
+            # Quick check against local ollama daemon instance state
+            ollama.show(model=self.model_target)
+            logger.info(f"Model target verification passed: '{self.model_target}' is ready.")
+        except Exception:
+            logger.warning(f"Target model '{self.model_target}' was not explicitly verified. Ensure 'ollama pull {self.model_target}' has run.")
+
+    def generate(self, prompt: str, system_override: str | None = None) -> str:
+        system_instruction = system_override or "You are a concise voice assistant. Limit replies to two sentences max."
+        
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt}
         ]
 
-        start = time.time()
-        response_stream = ollama.chat(
-            model=self.model_name,
-            messages=message, 
-            stream=True
-        )
-
-        logging.info("LLM inference started in %.2fs", time.time() - start)
-        
-        return response_stream
+        try:
+            start_time = time.time()
+            response = ollama.chat(model=self.model_target, messages=messages, stream=False)
+            
+            execution_latency = time.time() - start_time
+            content = response.get("message", {}).get("content", "").strip()
+            
+            logger.info(f"Inference execution cycle wrapped up in {execution_latency:.3f}s")
+            return content
+        except Exception as e:
+            logger.error(f"Critical failure across local model inference loop processing: {e}", exc_info=True)
+            return "I ran into a temporary error processing your request. Could you say that again?"
