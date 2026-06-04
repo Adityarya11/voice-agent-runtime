@@ -3,6 +3,7 @@ module voice-runtime/orchestrator-go
 go 1.26.3
 
 require (
+	github.com/goccy/go-yaml v1.19.2
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 )

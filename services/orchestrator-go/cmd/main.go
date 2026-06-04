@@ -2,23 +2,40 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 
 	pb "voice-runtime/orchestrator-go/generated"
+	"voice-runtime/orchestrator-go/internal/config"
+	"voice-runtime/orchestrator-go/internal/session"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
-	fmt.Println("[Go] Starting Orchestrator...")
+
+	profileName := flag.String("profile", "receptionist", "Name of the agent profile YAML to load")
+	flag.Parse()
+
+	fmt.Println("[Orchestrator] Booting Voice Runtime...")
+
+	agentConfig, err := config.LoadProfile(*profileName)
+	if err != nil {
+		log.Fatalf("Critical: Could not load agent profile: %v", err)
+	}
+	fmt.Printf("[Orchestrator] Loaded Profile: %s\n", agentConfig.Name)
+
+	currentSession := session.NewSession("session_prod_001", agentConfig)
+	currentSession.Start()
+	defer currentSession.Terminate()
 
 	conn, err := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Did not connect: %v", err)
+		log.Fatalf("Did not connect to Inference Engine: %v", err)
 	}
 	defer conn.Close()
 
@@ -28,81 +45,64 @@ func main() {
 		log.Fatalf("Error creating stream: %v", err)
 	}
 
-	sessionID := "session_001"
-	fmt.Printf("[Go] Connected to Python for %s\n", sessionID)
-
 	stream.Send(&pb.Event{
-		SessionId: sessionID,
+		SessionId: currentSession.ID,
 		Payload: &pb.Event_Control{
 			Control: &pb.ControlSignal{
 				Type: pb.ControlSignal_START_SESSION,
 				Profile: &pb.AgentProfile{
-					AgentName:    "Sarah the Tech Recruiter",
-					SystemPrompt: "You are Sarah, a technical recruiter for a startup. You are evaluating the user for a Golang Developer role. Be very enthusiastic. Keep responses to two short sentences.",
+					AgentName:    currentSession.Profile.Name,
+					SystemPrompt: currentSession.Profile.SystemPrompt,
 				},
 			},
 		},
 	})
 
-	// 1. Prepare to receive the AI's audio response
 	outputFile, err := os.Create("../../test_data/output.raw")
 	if err != nil {
 		log.Fatalf("Failed to create output file: %v", err)
 	}
 	defer outputFile.Close()
 
-	waitc := make(chan struct{})
 	go func() {
-		bytesReceived := 0
 		for {
 			in, err := stream.Recv()
 			if err == io.EOF {
-				close(waitc)
+				currentSession.DoneChan <- struct{}{}
 				return
 			}
 			if err != nil {
-				log.Fatalf("Failed to receive from Python: %v", err)
+				log.Printf("Stream error: %v", err)
+				return
 			}
 			if in.GetAudio() != nil {
-				data := in.GetAudio().Data
-				outputFile.Write(data)
-				bytesReceived += len(data)
-				fmt.Printf("\r[Go] Receiving AI Audio... %d bytes captured", bytesReceived)
+				outputFile.Write(in.GetAudio().Data)
 			}
 		}
 	}()
 
-	// 2. Read local input.wav and stream it to Python
 	inputFile, err := os.Open("../../test_data/input.wav")
 	if err != nil {
 		log.Fatalf("Failed to open input.wav: %v", err)
 	}
 	defer inputFile.Close()
 
-	buffer := make([]byte, 4096) // 4KB chunks
+	buffer := make([]byte, 4096)
 	for {
 		n, err := inputFile.Read(buffer)
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			log.Fatalf("Error reading input file: %v", err)
-		}
-
 		stream.Send(&pb.Event{
-			SessionId: sessionID,
+			SessionId: currentSession.ID,
 			Payload: &pb.Event_Audio{
 				Audio: &pb.AudioChunk{Data: buffer[:n]},
 			},
 		})
 	}
 
-	fmt.Println("[Go] Finished streaming user audio. Waiting for AI...")
-
-	// CloseSend tells Python the stream is done, triggering inference
+	fmt.Println("[Orchestrator] User audio dispatched. Awaiting inference...")
 	stream.CloseSend()
-
-	// Wait for Python to finish sending the AI audio back
-	<-waitc
-	fmt.Println("\n[Go] Stream complete. AI audio saved to test_data/output.raw")
+	<-currentSession.DoneChan
+	fmt.Println("[Orchestrator] Call completed successfully.")
 }
