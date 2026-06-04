@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"time"
+	"os"
 
 	pb "voice-runtime/orchestrator-go/generated"
 
@@ -16,7 +16,6 @@ import (
 func main() {
 	fmt.Println("[Go] Starting Orchestrator...")
 
-	// Connect to Python server
 	conn, err := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Did not connect: %v", err)
@@ -29,20 +28,19 @@ func main() {
 		log.Fatalf("Error creating stream: %v", err)
 	}
 
-	sessionID := "session_win_001"
-	fmt.Printf("[Go] Established stream for %s\n", sessionID)
+	sessionID := "session_001"
+	fmt.Printf("[Go] Connected to Python for %s\n", sessionID)
 
-	// Send Control Signal
-	stream.Send(&pb.Event{
-		SessionId: sessionID,
-		Payload: &pb.Event_Control{
-			Control: &pb.ControlSignal{Type: pb.ControlSignal_START_SESSION},
-		},
-	})
+	// 1. Prepare to receive the AI's audio response
+	outputFile, err := os.Create("../../test_data/output.raw")
+	if err != nil {
+		log.Fatalf("Failed to create output file: %v", err)
+	}
+	defer outputFile.Close()
 
-	// Goroutine to receive from Python
 	waitc := make(chan struct{})
 	go func() {
+		bytesReceived := 0
 		for {
 			in, err := stream.Recv()
 			if err == io.EOF {
@@ -50,28 +48,48 @@ func main() {
 				return
 			}
 			if err != nil {
-				log.Fatalf("Failed to receive a note : %v", err)
+				log.Fatalf("Failed to receive from Python: %v", err)
 			}
 			if in.GetAudio() != nil {
-				fmt.Printf("[Go] Received AI audio chunk: %s\n", string(in.GetAudio().Data))
+				data := in.GetAudio().Data
+				outputFile.Write(data)
+				bytesReceived += len(data)
+				fmt.Printf("\r[Go] Receiving AI Audio... %d bytes captured", bytesReceived)
 			}
 		}
 	}()
 
-	// Simulate streaming 5 audio chunks from a user
-	for i := 1; i <= 5; i++ {
-		dummyData := []byte(fmt.Sprintf("user_audio_chunk_%d", i))
-		fmt.Printf("[Go] Sending audio chunk %d...\n", i)
+	// 2. Read local input.wav and stream it to Python
+	inputFile, err := os.Open("../../test_data/input.wav")
+	if err != nil {
+		log.Fatalf("Failed to open input.wav: %v", err)
+	}
+	defer inputFile.Close()
+
+	buffer := make([]byte, 4096) // 4KB chunks
+	for {
+		n, err := inputFile.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("Error reading input file: %v", err)
+		}
+
 		stream.Send(&pb.Event{
 			SessionId: sessionID,
 			Payload: &pb.Event_Audio{
-				Audio: &pb.AudioChunk{Data: dummyData},
+				Audio: &pb.AudioChunk{Data: buffer[:n]},
 			},
 		})
-		time.Sleep(500 * time.Millisecond) // Wait half a second between chunks
 	}
 
+	fmt.Println("[Go] Finished streaming user audio. Waiting for AI...")
+
+	// CloseSend tells Python the stream is done, triggering inference
 	stream.CloseSend()
+
+	// Wait for Python to finish sending the AI audio back
 	<-waitc
-	fmt.Println("[Go] Stream finished. Orchestrator shutting down.")
+	fmt.Println("\n[Go] Stream complete. AI audio saved to test_data/output.raw")
 }

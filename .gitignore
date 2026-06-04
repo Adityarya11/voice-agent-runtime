@@ -2,3 +2,4 @@
 /__pycache__/*
 *.pyc
 services/inference-py/grpc_server/__pycache__/*
+services/inference-py/temp
