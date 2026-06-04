@@ -275,6 +275,7 @@ func (x *Transcript) GetIsFinal() bool {
 type ControlSignal struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
 	Type          ControlSignal_SignalType `protobuf:"varint,1,opt,name=type,proto3,enum=agent.ControlSignal_SignalType" json:"type,omitempty"`
+	Profile       *AgentProfile            `protobuf:"bytes,2,opt,name=profile,proto3" json:"profile,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -316,6 +317,65 @@ func (x *ControlSignal) GetType() ControlSignal_SignalType {
 	return ControlSignal_START_SESSION
 }
 
+func (x *ControlSignal) GetProfile() *AgentProfile {
+	if x != nil {
+		return x.Profile
+	}
+	return nil
+}
+
+type AgentProfile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AgentName     string                 `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	SystemPrompt  string                 `protobuf:"bytes,2,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentProfile) Reset() {
+	*x = AgentProfile{}
+	mi := &file_agent_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentProfile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentProfile) ProtoMessage() {}
+
+func (x *AgentProfile) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentProfile.ProtoReflect.Descriptor instead.
+func (*AgentProfile) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *AgentProfile) GetAgentName() string {
+	if x != nil {
+		return x.AgentName
+	}
+	return ""
+}
+
+func (x *AgentProfile) GetSystemPrompt() string {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return ""
+}
+
 var File_agent_proto protoreflect.FileDescriptor
 
 const file_agent_proto_rawDesc = "" +
@@ -336,17 +396,22 @@ const file_agent_proto_rawDesc = "" +
 	"\n" +
 	"Transcript\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x19\n" +
-	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\x84\x01\n" +
+	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\xb3\x01\n" +
 	"\rControlSignal\x123\n" +
-	"\x04type\x18\x01 \x01(\x0e2\x1f.agent.ControlSignal.SignalTypeR\x04type\">\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x1f.agent.ControlSignal.SignalTypeR\x04type\x12-\n" +
+	"\aprofile\x18\x02 \x01(\v2\x13.agent.AgentProfileR\aprofile\">\n" +
 	"\n" +
 	"SignalType\x12\x11\n" +
 	"\rSTART_SESSION\x10\x00\x12\x0f\n" +
 	"\vEND_SESSION\x10\x01\x12\f\n" +
-	"\bBARGE_IN\x10\x022<\n" +
+	"\bBARGE_IN\x10\x02\"R\n" +
+	"\fAgentProfile\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x01 \x01(\tR\tagentName\x12#\n" +
+	"\rsystem_prompt\x18\x02 \x01(\tR\fsystemPrompt2<\n" +
 	"\n" +
 	"VoiceAgent\x12.\n" +
-	"\fStreamEvents\x12\f.agent.Event\x1a\f.agent.Event(\x010\x01B/Z-voice-runtime/orchestrator-go/generated;agentb\x06proto3"
+	"\fStreamEvents\x12\f.agent.Event\x1a\f.agent.Event(\x010\x01B*Z(services/orchestrator-go/generated;agentb\x06proto3"
 
 var (
 	file_agent_proto_rawDescOnce sync.Once
@@ -361,26 +426,28 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_agent_proto_goTypes = []any{
 	(ControlSignal_SignalType)(0), // 0: agent.ControlSignal.SignalType
 	(*Event)(nil),                 // 1: agent.Event
 	(*AudioChunk)(nil),            // 2: agent.AudioChunk
 	(*Transcript)(nil),            // 3: agent.Transcript
 	(*ControlSignal)(nil),         // 4: agent.ControlSignal
+	(*AgentProfile)(nil),          // 5: agent.AgentProfile
 }
 var file_agent_proto_depIdxs = []int32{
 	2, // 0: agent.Event.audio:type_name -> agent.AudioChunk
 	3, // 1: agent.Event.transcript:type_name -> agent.Transcript
 	4, // 2: agent.Event.control:type_name -> agent.ControlSignal
 	0, // 3: agent.ControlSignal.type:type_name -> agent.ControlSignal.SignalType
-	1, // 4: agent.VoiceAgent.StreamEvents:input_type -> agent.Event
-	1, // 5: agent.VoiceAgent.StreamEvents:output_type -> agent.Event
-	5, // [5:6] is the sub-list for method output_type
-	4, // [4:5] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	5, // 4: agent.ControlSignal.profile:type_name -> agent.AgentProfile
+	1, // 5: agent.VoiceAgent.StreamEvents:input_type -> agent.Event
+	1, // 6: agent.VoiceAgent.StreamEvents:output_type -> agent.Event
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -399,7 +466,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

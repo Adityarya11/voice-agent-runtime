@@ -7,13 +7,13 @@ class LLMEngine:
         self.model_name = model_name
         logging.info(f"LLM Engine initiated, with {self.model_name}")
 
-    def generate_stream(self, user_text: str):
+    def generate_stream(self, system_prompt: str, user_text: str):
         ## enhancement: eventually move this prompt to the agent profile configs
 
         message = [
             {
                 "role": "system",
-                "content": "You are Aditya, a concise voice assistant. Respond in at most two short sentences."
+                "content": system_prompt
             }, 
             {
                 "role": "user", 

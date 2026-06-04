@@ -31,6 +31,19 @@ func main() {
 	sessionID := "session_001"
 	fmt.Printf("[Go] Connected to Python for %s\n", sessionID)
 
+	stream.Send(&pb.Event{
+		SessionId: sessionID,
+		Payload: &pb.Event_Control{
+			Control: &pb.ControlSignal{
+				Type: pb.ControlSignal_START_SESSION,
+				Profile: &pb.AgentProfile{
+					AgentName:    "Sarah the Tech Recruiter",
+					SystemPrompt: "You are Sarah, a technical recruiter for a startup. You are evaluating the user for a Golang Developer role. Be very enthusiastic. Keep responses to two short sentences.",
+				},
+			},
+		},
+	})
+
 	// 1. Prepare to receive the AI's audio response
 	outputFile, err := os.Create("../../test_data/output.raw")
 	if err != nil {

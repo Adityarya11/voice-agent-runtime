@@ -27,9 +27,19 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         audio_buffer = io.BytesIO()
         session_id = "unknown"
 
+        system_prompt = "You are a concise voice assistant. Respond in one short sentence."
+        
         for event in request_iterator: 
             session_id = event.session_id
-            if event.HasField("audio"): 
+
+            if event.HasField("control"):
+                if event.control.type == agent_pb2.ControlSignal.START_SESSION:
+                    profile = event.control.profile
+                    if profile.system_prompt:
+                        system_prompt = profile.system_prompt
+                        logging.info(f"Session {session_id} initialized as: {profile.agent_name}")
+
+            elif event.HasField("audio"):
                 audio_buffer.write(event.audio.data)
 
         logging.info("Received audio from session %s", session_id)
@@ -45,7 +55,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 return
             logging.info("Transcript: %s", user_text)
 
-            response_stream = self.llm.generate_stream(user_text)
+            response_stream = self.llm.generate_stream(system_prompt=system_prompt, user_text=user_text)
 
             full_response = []
             for chunk in response_stream: 
