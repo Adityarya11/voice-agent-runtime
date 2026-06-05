@@ -4,37 +4,46 @@ import ollama
 
 logger = logging.getLogger("InferenceEngine.LLM")
 
+_FALLBACK_SYSTEM_PROMPT = (
+    "You are a concise voice assistant. Limit replies to two sentences maximum."
+)
+
+
 class LLMEngine:
     def __init__(self, model_target: str = "qwen2.5:3b"):
         self.model_target = model_target
         self._verify_local_presence()
 
     def _verify_local_presence(self):
-        logger.info(f"Checking availability of underlying model runtime targets: '{self.model_target}'")
+        logger.info(f"Verifying model target: '{self.model_target}'")
         try:
-            # Quick check against local ollama daemon instance state
             ollama.show(model=self.model_target)
-            logger.info(f"Model target verification passed: '{self.model_target}' is ready.")
+            logger.info(f"Model '{self.model_target}' verified.")
         except Exception:
-            logger.warning(f"Target model '{self.model_target}' was not explicitly verified. Ensure 'ollama pull {self.model_target}' has run.")
+            logger.warning(
+                f"Model '{self.model_target}' could not be verified. "
+                f"Ensure 'ollama pull {self.model_target}' has been run."
+            )
 
     def generate(self, prompt: str, system_override: str | None = None) -> str:
-        system_instruction = system_override or "You are a concise voice assistant. Limit replies to two sentences max."
-        
+        system_prompt = system_override if system_override else _FALLBACK_SYSTEM_PROMPT
+
         messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
         ]
 
         try:
             start_time = time.time()
-            response = ollama.chat(model=self.model_target, messages=messages, stream=False)
-            
-            execution_latency = time.time() - start_time
+            response = ollama.chat(
+                model=self.model_target,
+                messages=messages,
+                stream=False
+            )
+            latency = time.time() - start_time
             content = response.get("message", {}).get("content", "").strip()
-            
-            logger.info(f"Inference execution cycle wrapped up in {execution_latency:.3f}s")
+            logger.info(f"Inference completed in {latency:.3f}s")
             return content
         except Exception as e:
-            logger.error(f"Critical failure across local model inference loop processing: {e}", exc_info=True)
-            return "I ran into a temporary error processing your request. Could you say that again?"
+            logger.error(f"Inference failure: {e}", exc_info=True)
+            return "I encountered an error processing your request. Please try again."
