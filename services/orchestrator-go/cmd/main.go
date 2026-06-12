@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -18,34 +17,40 @@ import (
 
 func main() {
 
-	profileName := flag.String("profile", "receptionist", "Name of the agent profile YAML to load")
+	profileName := flag.String("profile", "receptionist", "Agent profile YAML  name")
+
 	flag.Parse()
 
-	fmt.Println("[Orchestrator] Booting Voice Runtime...")
+	log.Println("[Orchestrator] Booting Voice Runtime... ")
 
 	agentConfig, err := config.LoadProfile(*profileName)
 	if err != nil {
-		log.Fatalf("Critical: Could not load agent profile: %v", err)
+		log.Fatalf("[Orchestrator] Failed to load the profile: %v", err)
 	}
-	fmt.Printf("[Orchestrator] Loaded Profile: %s\n", agentConfig.Name)
+	log.Printf("[Orchestrator] Profile Loaded: %s", agentConfig.Name)
 
-	currentSession := session.NewSession("session_prod_001", agentConfig)
-	currentSession.Start()
-	defer currentSession.Terminate()
+	conn, err := grpc.NewClient(
+		"localhost:50051",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 
-	conn, err := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Did not connect to Inference Engine: %v", err)
+		log.Fatalf("[Orchestrator] Failed to connect to the inference engine %v", err)
 	}
 	defer conn.Close()
 
 	client := pb.NewVoiceAgentClient(conn)
 	stream, err := client.StreamEvents(context.Background())
 	if err != nil {
-		log.Fatalf("Error creating stream: %v", err)
+		log.Fatalf("[Orchestrator] Failed to open the stream %v", err)
 	}
 
-	stream.Send(&pb.Event{
+	currentSession := session.NewSession("session_prod_0001", agentConfig)
+	if err := currentSession.Attach(stream); err != nil {
+		log.Fatalf("[Orchestrator] Failed to attach stream to session %v", err)
+	}
+
+	err = stream.Send(&pb.Event{
 		SessionId: currentSession.ID,
 		Payload: &pb.Event_Control{
 			Control: &pb.ControlSignal{
@@ -58,51 +63,51 @@ func main() {
 		},
 	})
 
-	outputFile, err := os.Create("../../test_data/output.raw")
 	if err != nil {
-		log.Fatalf("Failed to create output file: %v", err)
+		log.Fatalf("[Orchestrator] failed to send signal %v", err)
 	}
-	defer outputFile.Close()
 
-	go func() {
-		for {
-			in, err := stream.Recv()
-			if err == io.EOF {
-				currentSession.DoneChan <- struct{}{}
-				return
-			}
-			if err != nil {
-				log.Printf("Stream error: %v", err)
-				return
-			}
-			if in.GetAudio() != nil {
-				outputFile.Write(in.GetAudio().Data)
-			}
-		}
-	}()
+	go currentSession.Run()
 
 	inputFile, err := os.Open("../../test_data/input.wav")
 	if err != nil {
-		log.Fatalf("Failed to open input.wav: %v", err)
+		log.Fatalf("[Orchestrator] Failed to open the input file")
 	}
+
 	defer inputFile.Close()
 
 	buffer := make([]byte, 4096)
 	for {
 		n, err := inputFile.Read(buffer)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buffer[:n])
+			currentSession.UserAudioChan <- chunk
+		}
+
 		if err == io.EOF {
 			break
 		}
-		stream.Send(&pb.Event{
-			SessionId: currentSession.ID,
-			Payload: &pb.Event_Audio{
-				Audio: &pb.AudioChunk{Data: buffer[:n]},
-			},
-		})
+		if err != nil {
+			log.Printf("[Orchestrator] File read error : %v", err)
+			break
+		}
+
 	}
 
-	fmt.Println("[Orchestrator] User audio dispatched. Awaiting inference...")
-	stream.CloseSend()
+	close(currentSession.UserAudioChan)
+	log.Println("[Orchestrator] User audio Queued, Awaiting response ... ")
+
+	outputFile, err := os.Create("../../test_data/output.raw")
+	if err != nil {
+		log.Fatalf("[Orchestrator] Failed to create output file: %v", err)
+	}
+	defer outputFile.Close()
+
+	for chunk := range currentSession.AgentAudioChan {
+		outputFile.Write(chunk)
+	}
+
 	<-currentSession.DoneChan
-	fmt.Println("[Orchestrator] Call completed successfully.")
+	log.Println("[Orchestrator] Call completed successfully.")
 }
