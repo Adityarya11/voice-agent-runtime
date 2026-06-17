@@ -1,6 +1,7 @@
 import io
 import os
 import sys
+import time
 import signal
 import logging
 from concurrent import futures
@@ -70,28 +71,56 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 f.write(audio_buffer.getvalue())
 
             try:
+                stt_start = time.time()
                 user_text = self.transcriber.transcribe(temp_wav)
+                stt_latency = time.time() - stt_start
+
                 if not user_text:
                     logger.warning(f"[{session_id}] Empty transcription result.")
                     return
-                logger.info(f"[{session_id}] STT: {user_text}")
 
-                response_text = self.llm.generate(
+                logger.info(
+                    f"[{session_id}] STT: '{user_text}' "
+                    f"| latency: {stt_latency:.3f}s"
+                )
+
+                session_start = time.time()
+                chunks_sent = 0
+
+                for sentence in self.llm.generate_stream(
                     user_text,
                     system_override=system_prompt
-                )
-                logger.info(f"[{session_id}] LLM: {response_text}")
+                ):
+                    tts_start = time.time()
+                    wav_bytes = self.tts.synthesize(sentence)
+                    tts_latency = time.time() - tts_start
 
-                wav_bytes = self.tts.synthesize(response_text)
+                    if not wav_bytes:
+                        logger.warning(
+                            f"[{session_id}] TTS returned empty bytes "
+                            f"for sentence: '{sentence}'"
+                        )
+                        continue
 
-                for i in range(0, len(wav_bytes), CHUNK_SIZE):
-                    chunk = wav_bytes[i: i + CHUNK_SIZE]
-                    yield agent_pb2.Event(
-                        session_id=session_id,
-                        audio=agent_pb2.AudioChunk(data=chunk)
+                    logger.info(
+                        f"[{session_id}] TTS chunk: {len(wav_bytes)} bytes "
+                        f"| latency: {tts_latency:.3f}s"
                     )
 
-                logger.info(f"[{session_id}] Outbound audio transmission complete.")
+                    for i in range(0, len(wav_bytes), CHUNK_SIZE):
+                        chunk = wav_bytes[i: i + CHUNK_SIZE]
+                        yield agent_pb2.Event(
+                            session_id=session_id,
+                            audio=agent_pb2.AudioChunk(data=chunk)
+                        )
+                        chunks_sent += 1
+
+                total_latency = time.time() - session_start
+                logger.info(
+                    f"[{session_id}] Session complete — "
+                    f"chunks sent: {chunks_sent} | "
+                    f"total response time: {total_latency:.3f}s"
+                )
 
             finally:
                 if os.path.exists(temp_wav):
