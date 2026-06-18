@@ -31,6 +31,12 @@
   and reads `AgentAudioChan`. It has no knowledge of the stream internals.
 - `InterruptChan` is allocated and reserved for barge-in support.
 
+### Token Streaming from LLM (done)
+
+- Introduced `generate_stream()` with Ollama streaming (`stream=1`) and persistent model residency (`keep_alive=-1`) to eliminate cold-start overhead and enable incremental response delivery.
+- Pinned STT language to English (`language="en"`), bypassing auto-detection and reducing transcription latency from **`~0.9s to ~0.7s`** in test runs.
+- Achieved first-token latency (TTFT) of ~0.48s, with initial TTS audio streamed in ~0.06s and end-to-end `STT → LLM → TTS` response completion in **`~1.1–1.2s`** under favorable conditions.
+
 ---
 
 ## Backlog
@@ -75,7 +81,7 @@ closeOnce.Do(func() {
 
 This should be added when the monitor goroutine is implemented.
 
-### 3. Token streaming from LLM
+<!-- ### 3. Token streaming from LLM
 
 **Priority:** High. This is the next major milestone.
 
@@ -94,9 +100,9 @@ The correct pipeline is:
 
 This collapses the STT → LLM → TTS latency stack from sequential to
 overlapping and is the single largest perceived latency improvement
-available.
+available. -->
 
-### 4. True bidirectional duplex
+### 3. True bidirectional duplex
 
 **Priority:** High. Depends on token streaming being done first.
 
@@ -113,7 +119,7 @@ True duplex means:
 This requires VAD integration on the Python side and the monitor goroutine
 on the Go side to be in place first.
 
-### 5. VAD integration
+### 4. VAD integration
 
 **Priority:** Depends on duplex work.
 
