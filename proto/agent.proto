@@ -33,6 +33,7 @@ message ControlSignal {
         START_SESSION = 0; 
         END_SESSION = 1; 
         BARGE_IN = 2;   // user interrupts
+        END_OF_UTTERANCE = 3; // a pause in the audio-input
     }
 
     SignalType type = 1;

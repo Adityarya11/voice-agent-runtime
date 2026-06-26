@@ -25,7 +25,7 @@ const (
 var validTransitions = map[SessionState][]SessionState{
 	StateCreated:    {StateConnecting},
 	StateConnecting: {StateActive},
-	StateActive:     {StateProcessing, StateTerminated},
+	StateActive:     {StateProcessing, StateResponding, StateTerminated},
 	StateProcessing: {StateResponding, StateTerminated},
 	StateResponding: {StateActive, StateTerminated},
 	StateTerminated: {},
@@ -132,15 +132,20 @@ func (s *Session) writePump() {
 		}
 	}
 
-	if err := s.transitionTo(StateProcessing); err != nil {
-		log.Printf("[Session %s] writePump transition error: %v", s.ID, err)
+	err := s.stream.Send(&pb.Event{
+		SessionId: s.ID,
+		Payload: &pb.Event_Control{
+			Control: &pb.ControlSignal{
+				Type: pb.ControlSignal_END_OF_UTTERANCE,
+			},
+		},
+	})
+	if err != nil {
+		log.Printf("[Session %s] writePump failed to send END_OF_UTTERANCE: %v", s.ID, err)
+		return
 	}
 
-	if err := s.stream.CloseSend(); err != nil {
-		log.Printf("[Session %s] writePump CloseSend error: %v", s.ID, err)
-	}
-
-	log.Printf("[Session %s] All user audio dispatched. Inference in progress.", s.ID)
+	log.Printf("[Session %s] END_OF_UTTERANCE sent. Stream remains open.", s.ID)
 }
 
 func (s *Session) readPump() {

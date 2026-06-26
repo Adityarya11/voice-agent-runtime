@@ -4,6 +4,8 @@ import sys
 import time
 import signal
 import logging
+import threading
+import queue
 from concurrent import futures
 import grpc
 
@@ -23,6 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger("InferenceEngine")
 
 CHUNK_SIZE = 4096
+_SHUTDOWN = object()
 
 
 class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
@@ -33,111 +36,137 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         self.tts = Synthesizer()
         logger.info("All inference modules loaded.")
 
-    def StreamEvents(self, request_iterator, context):
-        logger.info("Incoming gRPC stream connected.")
-
-        audio_buffer = io.BytesIO()
-        session_id = "unknown"
-        system_prompt = None
-        agent_name = "unknown"
+    def _run_utterance(self, session_id, utterance_bytes, system_prompt, outbound_queue):
+        temp_wav = f"temp_in_{session_id}_{int(time.time() * 1000)}.wav"
 
         try:
-            for event in request_iterator:
-                session_id = event.session_id
+            with open(temp_wav, "wb") as f:
+                f.write(utterance_bytes)
 
-                if event.HasField("control"):
-                    control = event.control
-                    if control.profile.system_prompt:
-                        system_prompt = control.profile.system_prompt
-                        agent_name = control.profile.agent_name
-                        logger.info(
-                            f"[{session_id}] Profile received — agent: '{agent_name}'"
-                        )
+            stt_start = time.time()
+            user_text = self.transcriber.transcribe(temp_wav)
+            stt_latency = time.time() - stt_start
 
-                elif event.HasField("audio"):
-                    audio_buffer.write(event.audio.data)
-
-            if audio_buffer.tell() == 0:
-                logger.warning(f"[{session_id}] Stream closed with no audio payload.")
+            if not user_text:
+                logger.warning(f"[{session_id}] Empty transcription for utterance.")
                 return
 
             logger.info(
-                f"[{session_id}] Processing {audio_buffer.tell()} bytes "
-                f"under profile '{agent_name}'"
+                f"[{session_id}] STT: '{user_text}' | latency: {stt_latency:.3f}s"
             )
 
-            temp_wav = f"temp_in_{session_id}.wav"
-            with open(temp_wav, "wb") as f:
-                f.write(audio_buffer.getvalue())
-
-            try:
-                stt_start = time.time()
-                user_text = self.transcriber.transcribe(temp_wav)
-                stt_latency = time.time() - stt_start
-
-                if not user_text:
-                    logger.warning(f"[{session_id}] Empty transcription result.")
-                    return
-
-                logger.info(
-                    f"[{session_id}] STT: '{user_text}' "
-                    f"| latency: {stt_latency:.3f}s"
-                )
-
-                session_start = time.time()
-                chunks_sent = 0
-
-                for sentence in self.llm.generate_stream(
-                    user_text,
-                    system_override=system_prompt
-                ):
-                    tts_start = time.time()
-                    wav_bytes = self.tts.synthesize(sentence)
-                    tts_latency = time.time() - tts_start
-
-                    if not wav_bytes:
-                        logger.warning(
-                            f"[{session_id}] TTS returned empty bytes "
-                            f"for sentence: '{sentence}'"
-                        )
-                        continue
-
-                    logger.info(
-                        f"[{session_id}] TTS chunk: {len(wav_bytes)} bytes "
-                        f"| latency: {tts_latency:.3f}s"
+            for sentence in self.llm.generate_stream(
+                user_text,
+                system_override=system_prompt
+            ):
+                wav_bytes = self.tts.synthesize(sentence)
+                if not wav_bytes:
+                    logger.warning(
+                        f"[{session_id}] TTS returned empty bytes for: '{sentence}'"
                     )
+                    continue
 
-                    for i in range(0, len(wav_bytes), CHUNK_SIZE):
-                        chunk = wav_bytes[i: i + CHUNK_SIZE]
-                        yield agent_pb2.Event(
-                            session_id=session_id,
-                            audio=agent_pb2.AudioChunk(data=chunk)
-                        )
-                        chunks_sent += 1
+                for i in range(0, len(wav_bytes), CHUNK_SIZE):
+                    chunk = wav_bytes[i: i + CHUNK_SIZE]
+                    outbound_queue.put(agent_pb2.Event(
+                        session_id=session_id,
+                        audio=agent_pb2.AudioChunk(data=chunk)
+                    ))
 
-                total_latency = time.time() - session_start
-                logger.info(
-                    f"[{session_id}] Session complete — "
-                    f"chunks sent: {chunks_sent} | "
-                    f"total response time: {total_latency:.3f}s"
-                )
+            logger.info(f"[{session_id}] Utterance response complete.")
 
-            finally:
-                if os.path.exists(temp_wav):
-                    os.remove(temp_wav)
-
-        except grpc.RpcError as e:
-            logger.error(f"[{session_id}] gRPC error: {e}")
         except Exception as e:
-            logger.critical(
-                f"[{session_id}] Unhandled failure in session execution: {e}",
-                exc_info=True
+            logger.error(
+                f"[{session_id}] Utterance processing failure: {e}", exc_info=True
             )
+        finally:
+            if os.path.exists(temp_wav):
+                os.remove(temp_wav)
+
+    def _read_pump(self, request_iterator, session_id_holder, outbound_queue):
+        audio_buffer = bytearray()
+        system_prompt = None
+
+        try:
+            for event in request_iterator:
+                session_id_holder["id"] = event.session_id
+
+                if event.HasField("control"):
+                    control = event.control
+
+                    if control.profile.system_prompt:
+                        system_prompt = control.profile.system_prompt
+                        logger.info(
+                            f"[{session_id_holder['id']}] Profile received — "
+                            f"agent: '{control.profile.agent_name}'"
+                        )
+
+                    if control.type == agent_pb2.ControlSignal.END_OF_UTTERANCE:
+                        if len(audio_buffer) == 0:
+                            logger.warning(
+                                f"[{session_id_holder['id']}] "
+                                f"END_OF_UTTERANCE received with empty buffer, ignoring."
+                            )
+                            continue
+
+                        utterance_bytes = bytes(audio_buffer)
+                        audio_buffer.clear()
+
+                        logger.info(
+                            f"[{session_id_holder['id']}] Utterance boundary received "
+                            f"({len(utterance_bytes)} bytes). Dispatching inference."
+                        )
+
+                        threading.Thread(
+                            target=self._run_utterance,
+                            args=(
+                                session_id_holder["id"],
+                                utterance_bytes,
+                                system_prompt,
+                                outbound_queue,
+                            ),
+                            daemon=True,
+                        ).start()
+
+                elif event.HasField("audio"):
+                    audio_buffer.extend(event.audio.data)
+
+        except Exception as e:
+            logger.error(
+                f"[{session_id_holder['id']}] read_pump failure: {e}", exc_info=True
+            )
+        finally:
+            logger.info(
+                f"[{session_id_holder['id']}] Inbound stream closed. "
+                f"Signaling shutdown."
+            )
+            outbound_queue.put(_SHUTDOWN)
+
+    def StreamEvents(self, request_iterator, context):
+        logger.info("Incoming gRPC stream connected (duplex mode).")
+
+        outbound_queue = queue.Queue()
+        session_id_holder = {"id": "unknown"}
+
+        pump_thread = threading.Thread(
+            target=self._read_pump,
+            args=(request_iterator, session_id_holder, outbound_queue),
+            daemon=True,
+        )
+        pump_thread.start()
+
+        while True:
+            event = outbound_queue.get()
+            if event is _SHUTDOWN:
+                break
+            yield event
+
+        logger.info(f"[{session_id_holder['id']}] StreamEvents generator exiting.")
 
 
 def serve():
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=10),
+        futures.ThreadPoolExecutor(max_workers=20),
         options=[
             ("grpc.max_receive_message_length", 10 * 1024 * 1024),
             ("grpc.max_send_message_length", 10 * 1024 * 1024),
