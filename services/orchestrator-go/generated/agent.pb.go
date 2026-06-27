@@ -24,9 +24,10 @@ const (
 type ControlSignal_SignalType int32
 
 const (
-	ControlSignal_START_SESSION ControlSignal_SignalType = 0
-	ControlSignal_END_SESSION   ControlSignal_SignalType = 1
-	ControlSignal_BARGE_IN      ControlSignal_SignalType = 2 // user interrupts
+	ControlSignal_START_SESSION    ControlSignal_SignalType = 0
+	ControlSignal_END_SESSION      ControlSignal_SignalType = 1
+	ControlSignal_BARGE_IN         ControlSignal_SignalType = 2 // user interrupts
+	ControlSignal_END_OF_UTTERANCE ControlSignal_SignalType = 3 // a pause in the audio-input
 )
 
 // Enum value maps for ControlSignal_SignalType.
@@ -35,11 +36,13 @@ var (
 		0: "START_SESSION",
 		1: "END_SESSION",
 		2: "BARGE_IN",
+		3: "END_OF_UTTERANCE",
 	}
 	ControlSignal_SignalType_value = map[string]int32{
-		"START_SESSION": 0,
-		"END_SESSION":   1,
-		"BARGE_IN":      2,
+		"START_SESSION":    0,
+		"END_SESSION":      1,
+		"BARGE_IN":         2,
+		"END_OF_UTTERANCE": 3,
 	}
 )
 
@@ -396,15 +399,16 @@ const file_agent_proto_rawDesc = "" +
 	"\n" +
 	"Transcript\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x19\n" +
-	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\xb3\x01\n" +
+	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\xc9\x01\n" +
 	"\rControlSignal\x123\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x1f.agent.ControlSignal.SignalTypeR\x04type\x12-\n" +
-	"\aprofile\x18\x02 \x01(\v2\x13.agent.AgentProfileR\aprofile\">\n" +
+	"\aprofile\x18\x02 \x01(\v2\x13.agent.AgentProfileR\aprofile\"T\n" +
 	"\n" +
 	"SignalType\x12\x11\n" +
 	"\rSTART_SESSION\x10\x00\x12\x0f\n" +
 	"\vEND_SESSION\x10\x01\x12\f\n" +
-	"\bBARGE_IN\x10\x02\"R\n" +
+	"\bBARGE_IN\x10\x02\x12\x14\n" +
+	"\x10END_OF_UTTERANCE\x10\x03\"R\n" +
 	"\fAgentProfile\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x01 \x01(\tR\tagentName\x12#\n" +

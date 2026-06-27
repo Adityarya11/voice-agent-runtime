@@ -37,6 +37,24 @@
 - Pinned STT language to English (`language="en"`), bypassing auto-detection and reducing transcription latency from **`~0.9s to ~0.7s`** in test runs.
 - Achieved first-token latency (TTFT) of ~0.48s, with initial TTS audio streamed in ~0.06s and end-to-end `STT → LLM → TTS` response completion in **`~1.1–1.2s`** under favorable conditions.
 
+### True Duplex — Milestone 2: Single Utterance Duplex Path (completed) [PULL#6](https://github.com/Adityarya11/voice-agent-runtime/pull/6)
+
+- `END_OF_UTTERANCE` control signal added to proto as `SignalType = 3`.
+  Proto regenerated on both Go and Python sides.
+- `main.py` rewritten with three-worker architecture: `_read_pump` thread
+  owns inbound stream exclusively, per-utterance `_run_utterance` daemon
+  threads dispatch inference without blocking the listener, main thread
+  drains outbound queue and yields to gRPC.
+- `session.go` state machine updated: `ACTIVE → RESPONDING` direct
+  transition added, `writePump` sends `END_OF_UTTERANCE` instead of
+  calling `CloseSend()`, stream stays open after utterance boundary.
+- `context.is_active()` guard added to `_run_utterance` to abort
+  in-flight inference cleanly when the gRPC context is cancelled.
+- Verified: Go stream stays open after sending `END_OF_UTTERANCE`.
+  Python detects boundary, dispatches inference, streams response back.
+  Both graceful and ungraceful shutdown scenarios handled correctly on
+  both sides.
+
 ---
 
 ## Backlog

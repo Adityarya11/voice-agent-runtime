@@ -90,7 +90,7 @@ func main() {
 	}
 
 	close(currentSession.UserAudioChan)
-	log.Println("[Orchestrator] User audio queued. Awaiting response...")
+	log.Println("[Orchestrator] Audio feed complete. END_OF_UTTERANCE will be dispatched. Stream remains open.")
 
 	outputFile, err := os.Create("../../test_data/output.raw")
 	if err != nil {
@@ -103,5 +103,5 @@ func main() {
 	}
 
 	<-currentSession.DoneChan
-	log.Println("[Orchestrator] Call completed successfully.")
+	log.Println("[Orchestrator] Session completed via duplex path. Stream closed by inference engine.")
 }
