@@ -80,3 +80,7 @@ htmlcov/
 Thumbs.db
 
 *.diff
+
+services/inference-py/models
+
+test_data

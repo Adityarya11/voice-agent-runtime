@@ -36,7 +36,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         self.tts = Synthesizer()
         logger.info("All inference modules loaded.")
 
-    def _run_utterance(self, session_id, utterance_bytes, system_prompt, outbound_queue):
+    def _run_utterance(self, session_id, utterance_bytes, system_prompt, outbound_queue, context):
         temp_wav = f"temp_in_{session_id}_{int(time.time() * 1000)}.wav"
 
         try:
@@ -59,6 +59,13 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 user_text,
                 system_override=system_prompt
             ):
+                if not context.is_active():
+                    logger.warning(
+                        f"[{session_id}] gRPC context cancelled mid-utterance. "
+                        f"Stopping inference."
+                    )
+                    return
+
                 wav_bytes = self.tts.synthesize(sentence)
                 if not wav_bytes:
                     logger.warning(
@@ -83,7 +90,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
             if os.path.exists(temp_wav):
                 os.remove(temp_wav)
 
-    def _read_pump(self, request_iterator, session_id_holder, outbound_queue):
+    def _read_pump(self, request_iterator, session_id_holder, outbound_queue, context):
         audio_buffer = bytearray()
         system_prompt = None
 
@@ -124,6 +131,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                                 utterance_bytes,
                                 system_prompt,
                                 outbound_queue,
+                                context,
                             ),
                             daemon=True,
                         ).start()
@@ -150,7 +158,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
 
         pump_thread = threading.Thread(
             target=self._read_pump,
-            args=(request_iterator, session_id_holder, outbound_queue),
+            args=(request_iterator, session_id_holder, outbound_queue, context),
             daemon=True,
         )
         pump_thread.start()
