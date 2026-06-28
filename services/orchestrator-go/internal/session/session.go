@@ -42,8 +42,9 @@ type Session struct {
 	InterruptChan  chan struct{}
 	DoneChan       chan struct{}
 
-	mu     sync.Mutex
-	stream pb.VoiceAgent_StreamEventsClient
+	mu        sync.Mutex
+	closeOnce sync.Once
+	stream    pb.VoiceAgent_StreamEventsClient
 }
 
 func NewSession(id string, profile *config.AgentProfile) *Session {
@@ -98,6 +99,13 @@ func (s *Session) Attach(stream pb.VoiceAgent_StreamEventsClient) error {
 	}
 	log.Printf("[Session %s] Stream attached. Agent: %s", s.ID, s.Profile.Name)
 	return nil
+}
+
+func (s *Session) signalDone() {
+	s.closeOnce.Do(func() {
+		close(s.DoneChan)
+		log.Printf("[Session %s] DoneChan closed.", s.ID)
+	})
 }
 
 func (s *Session) StreamUtterance(audioPath string) error {
@@ -156,7 +164,7 @@ func (s *Session) Run() {
 
 func (s *Session) readPump() {
 	defer close(s.AgentAudioChan)
-	defer close(s.DoneChan)
+	defer s.signalDone()
 
 	firstChunk := true
 
@@ -191,5 +199,6 @@ func (s *Session) Terminate() {
 		log.Printf("[Session %s] Terminate: %v", s.ID, err)
 		return
 	}
+	s.signalDone()
 	log.Printf("[Session %s] Terminated.", s.ID)
 }
