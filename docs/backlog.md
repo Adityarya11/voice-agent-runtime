@@ -78,44 +78,51 @@
   response back while stream remains bidirectional. Go transitions
   `ACTIVE → RESPONDING` while the send side is still technically open.
 
+### True Duplex — Milestone 3: Sequential Utterance Processing (completed)
+
+- `StreamUtterance()` added to `session.go` — streams a WAV file directly
+  onto the gRPC stream and sends `END_OF_UTTERANCE` atomically after all
+  audio bytes are sent. Eliminates the channel-drain race condition that
+  caused audio bleeding between utterances when using `UserAudioChan` as
+  an intermediary buffer.
+- `UserAudioChan` and `writePump` removed from `Session` struct for this
+  test harness — sending is now handled directly by `StreamUtterance`,
+  preserving gRPC encapsulation without the concurrent-producer complexity
+  that caused ordering bugs.
+- `utterance_done_event` (`threading.Event`) added to `_read_pump` in
+  `main.py` — gates dispatch of new `_run_utterance` threads so only one
+  utterance is processed at a time. If `END_OF_UTTERANCE` arrives while
+  inference is in progress, `_read_pump` blocks until the current thread
+  completes before dispatching the next one.
+- Verified with two distinct audio inputs on one open stream:
+  - `input_1.wav` (440364 bytes) — earlier this caught halfway through the stt capture. and remaining bytes gor garbled in the next audio.
+  - `input_2.wav` (391212 bytes) — Instead of starting from the actual, start of the audio 2, it started with the leftovers of the `input_1` and thus got garbled.
+    - Solved using `utteranch_done_event`.
+  - Both transcriptions correct, LLM responses coherent and distinct,
+    zero byte bleeding between utterance buffers.
+  - Sequential gate confirmed via "END_OF_UTTERANCE received while
+    utterance in progress. Waiting" log line.
+
+### True Duplex — Milestone 4: Polish and Edge Cases (Partial)
+
+- Empty utterance buffer guard implemented and verified. Rogue `END_OF_UTTERANCE` control signals arriving before any audio chunks are caught and explicitly ignored, preventing downstream STT crashes or state corruption.
+- Performance and latency benchmarks recorded under throttled hardware constraints (RTX 3050 Mobile):
+  - **LLM TTFT (Time To First Token):** ~0.45s – 0.58s.
+  - **TTS Generation:** ~2.12s cold start for the initial chunk; drops to ~0.06s – 0.10s for subsequent sentence chunks once the model is warm.
+  - **STT (Faster-Whisper):** ~1.09s for initial audio; drops to ~0.63s on immediately subsequent utterances.
+
 ---
 
 ## Active Backlog
-
-### True Duplex — Milestone 3: Sequential Utterance Processing
-
-**Branch:** `feature/true-duplex-m3`
-**Priority:** Current.
-
-`_read_pump` currently spawns a new `_run_utterance` thread for every
-`END_OF_UTTERANCE` signal with no gate on whether a previous utterance
-is still being processed. If two utterances arrive in quick succession,
-two inference threads write interleaved audio chunks onto the shared
-queue, producing garbled output.
-
-**Design decision:** Sequential processing via an in-progress flag rather
-than concurrent ordered processing. Only one `_run_utterance` thread
-runs at a time. If a boundary signal arrives while inference is in
-progress, the new utterance audio is buffered and dispatched only after
-the current thread completes. This eliminates the ordering problem with
-zero coordination overhead and is the correct choice before VAD is in
-place, since without VAD the boundary signals are synthetic and
-overlapping utterances in a test harness are an edge case, not the
-normal path.
-
-Concurrent ordered processing — sequence-numbered chunks, write_pump
-enforcing strict output order — is tracked as a future enhancement for
-when real concurrent callers and barge-in behavior are in scope.
 
 ### True Duplex — Milestone 4: Polish and Edge Cases
 
 **Priority:** Follows milestone 3.
 
-- Graceful handling of empty utterance buffer on `END_OF_UTTERANCE`
-  (already guarded with a warning log — verify behavior under test).
 - Backpressure: define behavior when `outbound_queue` grows beyond a
   threshold (inference faster than Go can consume — unlikely on current
   hardware but needs a defined policy).
+  - Not Gonna happen as TTS Latency(s) > gRPC network call(ms).
 - Verify `_run_utterance` temp file cleanup under all exit paths,
   including `context.is_active()` early return.
 

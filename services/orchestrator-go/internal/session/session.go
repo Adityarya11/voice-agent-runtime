@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -37,7 +38,6 @@ type Session struct {
 	State     SessionState
 	StartedAt time.Time
 
-	UserAudioChan  chan []byte
 	AgentAudioChan chan []byte
 	InterruptChan  chan struct{}
 	DoneChan       chan struct{}
@@ -53,7 +53,6 @@ func NewSession(id string, profile *config.AgentProfile) *Session {
 		State:     StateCreated,
 		StartedAt: time.Now(),
 
-		UserAudioChan:  make(chan []byte, 100),
 		AgentAudioChan: make(chan []byte, 100),
 		InterruptChan:  make(chan struct{}, 1),
 		DoneChan:       make(chan struct{}),
@@ -101,38 +100,38 @@ func (s *Session) Attach(stream pb.VoiceAgent_StreamEventsClient) error {
 	return nil
 }
 
-func (s *Session) Run() {
-	var wg sync.WaitGroup
-	wg.Add(2)
+func (s *Session) StreamUtterance(audioPath string) error {
+	f, err := os.Open(audioPath)
+	if err != nil {
+		return fmt.Errorf("session %s: failed to open audio file: %v", s.ID, err)
+	}
+	defer f.Close()
 
-	go func() {
-		defer wg.Done()
-		s.writePump()
-	}()
-
-	go func() {
-		defer wg.Done()
-		s.readPump()
-	}()
-
-	wg.Wait()
-}
-
-func (s *Session) writePump() {
-	for chunk := range s.UserAudioChan {
-		err := s.stream.Send(&pb.Event{
-			SessionId: s.ID,
-			Payload: &pb.Event_Audio{
-				Audio: &pb.AudioChunk{Data: chunk},
-			},
-		})
-		if err != nil {
-			log.Printf("[Session %s] writePump send error: %v", s.ID, err)
-			return
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			sendErr := s.stream.Send(&pb.Event{
+				SessionId: s.ID,
+				Payload: &pb.Event_Audio{
+					Audio: &pb.AudioChunk{Data: chunk},
+				},
+			})
+			if sendErr != nil {
+				return fmt.Errorf("session %s: audio send error: %v", s.ID, sendErr)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("session %s: file read error: %v", s.ID, readErr)
 		}
 	}
 
-	err := s.stream.Send(&pb.Event{
+	sendErr := s.stream.Send(&pb.Event{
 		SessionId: s.ID,
 		Payload: &pb.Event_Control{
 			Control: &pb.ControlSignal{
@@ -140,12 +139,19 @@ func (s *Session) writePump() {
 			},
 		},
 	})
-	if err != nil {
-		log.Printf("[Session %s] writePump failed to send END_OF_UTTERANCE: %v", s.ID, err)
-		return
+	if sendErr != nil {
+		return fmt.Errorf("session %s: END_OF_UTTERANCE send error: %v", s.ID, sendErr)
 	}
 
-	log.Printf("[Session %s] END_OF_UTTERANCE sent. Stream remains open.", s.ID)
+	log.Printf(
+		"[Session %s] Utterance streamed from '%s'. END_OF_UTTERANCE sent.",
+		s.ID, audioPath,
+	)
+	return nil
+}
+
+func (s *Session) Run() {
+	s.readPump()
 }
 
 func (s *Session) readPump() {
