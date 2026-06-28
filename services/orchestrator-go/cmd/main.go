@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"io"
 	"log"
 	"os"
 
@@ -19,7 +18,7 @@ func main() {
 	profileName := flag.String("profile", "receptionist", "Agent profile YAML name")
 	flag.Parse()
 
-	log.Println("[Orchestrator] Booting Voice Runtime...")
+	log.Println("[Orchestrator] Booting Voice Runtime — duplex milestone 3 test.")
 
 	agentConfig, err := config.LoadProfile(*profileName)
 	if err != nil {
@@ -61,47 +60,58 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Fatalf("[Orchestrator] Failed to send control signal: %v", err)
+		log.Fatalf("[Orchestrator] Failed to send START_SESSION: %v", err)
 	}
 
-	go currentSession.Run()
-
-	inputFile, err := os.Open("../../test_data/input.wav")
-	if err != nil {
-		log.Fatalf("[Orchestrator] Failed to open input file: %v", err)
-	}
-	defer inputFile.Close()
-
-	buffer := make([]byte, 4096)
-	for {
-		n, err := inputFile.Read(buffer)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buffer[:n])
-			currentSession.UserAudioChan <- chunk
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Printf("[Orchestrator] File read error: %v", err)
-			break
-		}
-	}
-
-	close(currentSession.UserAudioChan)
-	log.Println("[Orchestrator] Audio feed complete. END_OF_UTTERANCE will be dispatched. Stream remains open.")
-
-	outputFile, err := os.Create("../../test_data/output.raw")
+	outputFile, err := os.Create("../../test_data/output_m3.raw")
 	if err != nil {
 		log.Fatalf("[Orchestrator] Failed to create output file: %v", err)
 	}
 	defer outputFile.Close()
 
-	for chunk := range currentSession.AgentAudioChan {
-		outputFile.Write(chunk)
+	go func() {
+		for chunk := range currentSession.AgentAudioChan {
+			outputFile.Write(chunk)
+		}
+	}()
+
+	go currentSession.Run()
+
+	// ── MILESTONE 4 EMPTY BUFFER GUARD TEST ──────────────────────────────────
+	// Sends a rogue END_OF_UTTERANCE before any audio has been buffered.
+	// Expected: Python logs a warning and continues. No crash, no state corruption.
+	// Remove this block before production use.
+	log.Println("[Orchestrator] [M4-TEST] Sending rogue END_OF_UTTERANCE with empty buffer...")
+	if err := currentSession.StreamUtterance(""); err == nil {
+		// StreamUtterance with empty path will fail at os.Open — handle below instead
 	}
+	// Send the control signal directly since there is no audio to stream
+	err = stream.Send(&pb.Event{
+		SessionId: currentSession.ID,
+		Payload: &pb.Event_Control{
+			Control: &pb.ControlSignal{
+				Type: pb.ControlSignal_END_OF_UTTERANCE,
+			},
+		},
+	})
+	if err != nil {
+		log.Printf("[Orchestrator] [M4-TEST] Rogue signal send error: %v", err)
+	}
+	log.Println("[Orchestrator] [M4-TEST] Rogue END_OF_UTTERANCE sent. Waiting for Python to acknowledge...")
+	// ── END MILESTONE 4 TEST ──────────────────────────────────────────────────
+
+	log.Println("[Orchestrator] Streaming utterance 1...")
+	if err := currentSession.StreamUtterance("../../test_data/input_1.wav"); err != nil {
+		log.Fatalf("[Orchestrator] Utterance 1 failed: %v", err)
+	}
+	log.Println("[Orchestrator] Utterance 1 complete.")
+
+	log.Println("[Orchestrator] Streaming utterance 2...")
+	if err := currentSession.StreamUtterance("../../test_data/input_2.wav"); err != nil {
+		log.Fatalf("[Orchestrator] Utterance 2 failed: %v", err)
+	}
+	log.Println("[Orchestrator] Utterance 2 complete.")
 
 	<-currentSession.DoneChan
-	log.Println("[Orchestrator] Session completed via duplex path. Stream closed by inference engine.")
+	log.Println("[Orchestrator] Both utterances processed. Session complete.")
 }

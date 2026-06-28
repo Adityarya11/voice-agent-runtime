@@ -36,7 +36,8 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         self.tts = Synthesizer()
         logger.info("All inference modules loaded.")
 
-    def _run_utterance(self, session_id, utterance_bytes, system_prompt, outbound_queue, context):
+    def _run_utterance(self, session_id, utterance_bytes, system_prompt, outbound_queue, context, utterance_done_event):
+
         temp_wav = f"temp_in_{session_id}_{int(time.time() * 1000)}.wav"
 
         try:
@@ -89,10 +90,14 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         finally:
             if os.path.exists(temp_wav):
                 os.remove(temp_wav)
+            utterance_done_event.set()
 
     def _read_pump(self, request_iterator, session_id_holder, outbound_queue, context):
+        
         audio_buffer = bytearray()
         system_prompt = None
+        utterance_done_event = threading.Event()
+        utterance_done_event.set()
 
         try:
             for event in request_iterator:
@@ -116,8 +121,17 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                             )
                             continue
 
+                        if not utterance_done_event.is_set():
+                            logger.warning(
+                                f"[{session_id_holder['id']}] "
+                                f"END_OF_UTTERANCE received while utterance in progress. "
+                                f"Waiting for current utterance to complete."
+                            )
+                            utterance_done_event.wait()
+
                         utterance_bytes = bytes(audio_buffer)
                         audio_buffer.clear()
+                        utterance_done_event.clear()
 
                         logger.info(
                             f"[{session_id_holder['id']}] Utterance boundary received "
@@ -132,6 +146,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                                 system_prompt,
                                 outbound_queue,
                                 context,
+                                utterance_done_event,
                             ),
                             daemon=True,
                         ).start()
