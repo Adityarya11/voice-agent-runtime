@@ -80,6 +80,8 @@
 
 ### True Duplex — Milestone 3: Sequential Utterance Processing (completed)
 
+[PR#8](https://github.com/Adityarya11/voice-agent-runtime/pull/8)
+
 - `StreamUtterance()` added to `session.go` — streams a WAV file directly
   onto the gRPC stream and sends `END_OF_UTTERANCE` atomically after all
   audio bytes are sent. Eliminates the channel-drain race condition that
