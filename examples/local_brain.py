@@ -21,8 +21,8 @@ MODEL_URL = (
 
 CONFIG_URL = MODEL_URL + ".json"
 
-MODEL_FILE = "models/en_US-lessac-medium.onnx"
-CONFIG_FILE = "models/en_US-lessac-medium.onnx.json"
+MODEL_FILE = "services/models/en_US-lessac-medium.onnx"
+CONFIG_FILE = "services/models/en_US-lessac-medium.onnx.json"
 
 if not os.path.exists(MODEL_FILE):
     print("[System] Downloading Piper voice model...")

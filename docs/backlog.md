@@ -2,7 +2,7 @@
 
 ## Completed Work
 
-### Dynamic Profiling
+### 1. Dynamic Profiling
 
 - `StreamEvents` in `main.py` reads the incoming `ControlSignal` before
   processing audio chunks.
@@ -13,7 +13,9 @@
 - Verified: LLM responds as the loaded agent persona, not as a generic
   assistant.
 
-### Session Management
+---
+
+### 2. Session Management
 
 - `session.go` rewritten from a passive data struct into an active
   controller owning the gRPC stream reference via `Attach()`.
@@ -29,7 +31,9 @@
   reads `AgentAudioChan`, has no knowledge of stream internals.
 - `InterruptChan` allocated and reserved for future barge-in support.
 
-### Token Streaming from LLM
+---
+
+### 3. Token Streaming from LLM
 
 - `generate_stream()` introduced with `stream=True` and `keep_alive=-1`
   to eliminate cold-start overhead and enable incremental delivery.
@@ -43,7 +47,9 @@
 - Measured steady-state performance (warm model, fresh boot, idle GPU):
   TTFT ~0.43–0.50s, end-to-end STT → first audio byte ~1.0–1.1s.
 
-### True Duplex — Milestone 1: Three-Worker Architecture
+---
+
+### 4. True Duplex — Milestone 1: Three-Worker Architecture
 
 - `main.py` rewritten from a sequential blocking handler into a
   three-worker concurrent architecture.
@@ -54,6 +60,8 @@
   signals — inference never blocks the listener.
 - Main thread drains a `queue.Queue` with an `object()` sentinel
   (`_SHUTDOWN`) and yields to gRPC — the sole outbound path.
+
+---
 
 ### True Duplex — Milestone 2: Single Utterance Duplex Path
 
@@ -77,6 +85,8 @@
   detects boundary, dispatches inference on a daemon thread, streams
   response back while stream remains bidirectional. Go transitions
   `ACTIVE → RESPONDING` while the send side is still technically open.
+
+---
 
 ### True Duplex — Milestone 3: Sequential Utterance Processing (completed)
 
@@ -105,6 +115,8 @@
   - Sequential gate confirmed via "END_OF_UTTERANCE received while
     utterance in progress. Waiting" log line.
 
+---
+
 ### True Duplex — Milestone 4: Polish and Edge Cases (Partial)
 
 - Empty utterance buffer guard implemented and verified. Rogue `END_OF_UTTERANCE` control signals arriving before any audio chunks are caught and explicitly ignored, preventing downstream STT crashes or state corruption.
@@ -128,28 +140,44 @@
 - Verify `_run_utterance` temp file cleanup under all exit paths,
   including `context.is_active()` early return.
 
-### VAD Integration
+### VAD Integration — Milestone 1: Standalone Model Verification (completed)
 
-**Priority:** Follows true duplex milestones.
-**Branch:** new branch after milestone 4 merges.
+- **[test_vad_standalone.py](../examples/test_vad_standalone.py)**
+- Silero VAD ONNX model loaded via `onnxruntime`, downloaded directly rather
+  than via the `silero-vad` package to keep dependencies minimal.
+- Verified against `input_1.wav`: silence frames consistently score under
+  0.1, speech frames consistently score above 0.5. Confirmed model input
+  contract is a single unified `(2, 1, 128)` state tensor plus explicit
+  `sr` input, not separate `h`/`c` tensors as initially assumed.
+- Frame math verified: 512 samples at 16kHz = 32ms per frame.
 
-`END_OF_UTTERANCE` is currently a synthetic boundary signal sent
-explicitly by Go's test harness. For a live call via AetherRTC, no such
-signal exists — the stream is continuous audio from a browser with no
-`CloseSend()` and no explicit turn boundary.
+### VAD Integration — Milestone 2: Four-State Debounce Machine
 
-VAD replaces the explicit signal with a detected one. Silero VAD running
-on CPU inside `_read_pump` monitors the incoming audio stream and fires
-a boundary event when it detects a sustained silence (tunable threshold,
-starting at ~500ms). The `END_OF_UTTERANCE` enum value is reused or
-repurposed — the signal's origin shifts from Go sending it explicitly to
-Python detecting it internally and acting on it without any signal from
-Go at all.
+**Branch:** `feature/vad-integration`
 
-The `vad/` directory is already scaffolded in `inference-py/`.
-Dependency: `silero-vad` via torch or onnxruntime — evaluate VRAM
-impact before committing, since the GPU is already carrying `qwen2.5:3b`
-at 2.2GB.
+- `vad/detector.py` implements `SILENCE -> SPEECH_STARTING -> SPEECH ->
+SPEECH_ENDING` state machine over raw per-frame model output.
+- Recurrent state (`state` tensor) persists across utterances within a
+  session, reset only via explicit `reset()` at session boundaries -- not
+  per utterance, since it encodes acoustic context rather than
+  utterance-scoped information.
+- Standalone test harness validates against tiled real audio segments
+  (not synthetic frames, since the model does not respond predictably to
+  synthetic signals).
+
+### VAD Integration — Milestone 3: Pipeline Integration
+
+- Wire `VADDetector` into `_read_pump`. Add `scipy.signal.resample_poly`
+  to convert incoming gRPC audio to 16kHz before frame slicing.
+- Go's `END_OF_UTTERANCE` send stays as a manual override during testing.
+  Not removed yet.
+
+### VAD Integration — Milestone 4: Tuning and Edge Cases
+
+- Silence-only stream, false-start noise burst, back-to-back utterances
+  with state persistence verified.
+- Remove Go's explicit `END_OF_UTTERANCE` send once VAD is proven reliable
+  end to end.
 
 ### Monitor Goroutine (Go)
 
