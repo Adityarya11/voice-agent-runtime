@@ -8,8 +8,12 @@ import time
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-MODEL_PATH = os.path.join("vad", "models", "silero_vad.onnx")
-TEST_WAV_PATH = "../../test_data/input.wav"
+TEST_DIR = os.path.dirname(__file__)
+SERVICE_DIR = os.path.abspath(os.path.join(TEST_DIR, ".."))
+REPO_ROOT = os.path.abspath(os.path.join(TEST_DIR, "..", "..", ".."))
+
+MODEL_PATH = os.path.join(SERVICE_DIR, "models", "silero_vad.onnx")
+TEST_WAV_PATH = os.path.join(REPO_ROOT, "test_data", "input.wav")
 TARGET_SR = 16000
 FRAME_SIZE = 512  # 32ms at 16kHz
 THRESHOLD = 0.5   # Standard Silero threshold
