@@ -125,6 +125,39 @@
   - **TTS Generation:** ~2.12s cold start for the initial chunk; drops to ~0.06s – 0.10s for subsequent sentence chunks once the model is warm.
   - **STT (Faster-Whisper):** ~1.09s for initial audio; drops to ~0.63s on immediately subsequent utterances.
 
+### VAD Integration — Milestone 1: Standalone Model Verification (completed)
+
+- **[test_vad_standalone.py](../examples/test_vad_standalone.py)**
+- Silero VAD ONNX model loaded via `onnxruntime`, downloaded directly rather
+  than via the `silero-vad` package to keep dependencies minimal.
+- Verified against `input_1.wav`: silence frames consistently score under
+  0.1, speech frames consistently score above 0.5. Confirmed model input
+  contract is a single unified `(2, 1, 128)` state tensor plus explicit
+  `sr` input, not separate `h`/`c` tensors as initially assumed.
+- Frame math verified: 512 samples at 16kHz = 32ms per frame.
+
+### VAD Integration — Milestone 2: Four-State Debounce Machine (completed)
+
+[PR#9](https://github.com/Adityarya11/voice-agent-runtime/pull/9)
+
+- `vad/detector.py` implements `SILENCE -> SPEECH_STARTING -> SPEECH ->
+SPEECH_ENDING` over raw per-frame Silero output.
+- Recurrent state persists across utterances within a session; `reset()`
+  is reserved for session boundaries only.
+- Validation history: tiling real audio segments to build a synthetic
+  test sequence was attempted first and rejected -- looped splicing
+  introduced waveform discontinuities the model read as transients,
+  producing false SPEECH_STARTING/SILENCE oscillation. A live human
+  recording was attempted next; the intended sub-500ms breath pause
+  measured closer to 1100ms in practice, correctly triggering two
+  utterance boundaries -- confirming detector correctness, not failure.
+- Final validation: two real speech segments from `input_1.wav` joined
+  by an exact 400ms digital silence gap and a trailing 1000ms silence.
+  Result: one `START_SPEECH`, no boundary at the 400ms gap (below the
+  500ms threshold), one `END_OF_UTTERANCE` during the trailing silence.
+- Parameters confirmed: `threshold=0.5`, `min_speech_duration_ms=250`,
+  `min_silence_duration_ms=500`.
+
 ---
 
 ## Active Backlog
@@ -139,31 +172,6 @@
   - Not Gonna happen as TTS Latency(s) > gRPC network call(ms).
 - Verify `_run_utterance` temp file cleanup under all exit paths,
   including `context.is_active()` early return.
-
-### VAD Integration — Milestone 1: Standalone Model Verification (completed)
-
-- **[test_vad_standalone.py](../examples/test_vad_standalone.py)**
-- Silero VAD ONNX model loaded via `onnxruntime`, downloaded directly rather
-  than via the `silero-vad` package to keep dependencies minimal.
-- Verified against `input_1.wav`: silence frames consistently score under
-  0.1, speech frames consistently score above 0.5. Confirmed model input
-  contract is a single unified `(2, 1, 128)` state tensor plus explicit
-  `sr` input, not separate `h`/`c` tensors as initially assumed.
-- Frame math verified: 512 samples at 16kHz = 32ms per frame.
-
-### VAD Integration — Milestone 2: Four-State Debounce Machine
-
-**Branch:** `feature/vad-integration`
-
-- `vad/detector.py` implements `SILENCE -> SPEECH_STARTING -> SPEECH ->
-SPEECH_ENDING` state machine over raw per-frame model output.
-- Recurrent state (`state` tensor) persists across utterances within a
-  session, reset only via explicit `reset()` at session boundaries -- not
-  per utterance, since it encodes acoustic context rather than
-  utterance-scoped information.
-- Standalone test harness validates against tiled real audio segments
-  (not synthetic frames, since the model does not respond predictably to
-  synthetic signals).
 
 ### VAD Integration — Milestone 3: Pipeline Integration
 
