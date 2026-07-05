@@ -158,6 +158,27 @@ SPEECH_ENDING` over raw per-frame Silero output.
 - Parameters confirmed: `threshold=0.5`, `min_speech_duration_ms=250`,
   `min_silence_duration_ms=500`.
 
+### VAD Integration — Milestone 3: Pipeline Integration (completed)
+
+[PR#10](https://github.com/Adityarya11/voice-agent-runtime/pull/10)
+
+- `vad/preprocessor.py` added — `AudioPreprocessor` handles bytes-to-frames:
+  raw PCM bytes → int16 → float32 normalize → `resample_poly` to 16kHz →
+  512-sample frames, carrying remainder across calls.
+- `vad/audio.py` added — `frames_to_wav` converts VAD utterance frames
+  (float32 numpy array) to a valid in-memory WAV file at 16kHz for STT.
+- `main.py` updated — `_read_pump` instantiates `VADDetector` and
+  `AudioPreprocessor` per session (stateful, not shared across sessions).
+  VAD boundary and Go manual override both call `_dispatch_utterance`,
+  which calls `vad.get_utterance_frames()` and `frames_to_wav()` before
+  handing bytes to `_run_utterance`. Old raw `audio_buffer` bytearray
+  removed entirely — audio accumulation now lives inside `VADDetector`.
+- `SOURCE_SAMPLE_RATE = 44100` is a module-level constant scoped to the
+  test harness. Will become a per-session parameter when AetherRTC lands
+  with its 8kHz G.711 stream.
+- Verified: two utterances on one open stream, VAD-detected boundaries,
+  correct transcriptions, sequential gating, clean shutdown on both sides.
+
 ---
 
 ## Active Backlog
@@ -172,13 +193,6 @@ SPEECH_ENDING` over raw per-frame Silero output.
   - Not Gonna happen as TTS Latency(s) > gRPC network call(ms).
 - Verify `_run_utterance` temp file cleanup under all exit paths,
   including `context.is_active()` early return.
-
-### VAD Integration — Milestone 3: Pipeline Integration
-
-- Wire `VADDetector` into `_read_pump`. Add `scipy.signal.resample_poly`
-  to convert incoming gRPC audio to 16kHz before frame slicing.
-- Go's `END_OF_UTTERANCE` send stays as a manual override during testing.
-  Not removed yet.
 
 ### VAD Integration — Milestone 4: Tuning and Edge Cases
 
