@@ -13,9 +13,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "grpc_server"))
 import agent_pb2
 import agent_pb2_grpc
 
-from stt.transcriber import Transcriber
-from llm.engine import LLMEngine
-from tts.synthesizer import Synthesizer
+from stt import Transcriber
+from llm import LLMEngine
+from tts import Synthesizer
+from vad import (
+    AudioPreprocessor, 
+    frames_to_wav, 
+    VADCommand,
+    VADDetector
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +32,8 @@ logger = logging.getLogger("InferenceEngine")
 
 CHUNK_SIZE = 4096
 _SHUTDOWN = object()
+VAD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "silero_vad.onnx")
+SOURCE_SAMPLE_RATE = 44100
 
 
 class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
@@ -92,16 +100,46 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 os.remove(temp_wav)
             utterance_done_event.set()
 
-    def _read_pump(self, request_iterator, session_id_holder, outbound_queue, context):
+    def _dispatch_utterance(self, session_id, vad, system_prompt, outbound_queue, context, utterance_done_event,):
         
-        audio_buffer = bytearray()
+        frames = vad.get_utterance_frames()
+        if len(frames) == 0:
+            logger.warning(f"[{session_id}] Boundary fired with empty VAD buffer, ignoring.")
+            return
+
+        utterance_bytes = frames_to_wav(frames, AudioPreprocessor.TARGET_SR)
+        utterance_done_event.clear()
+
+        logger.info(
+            f"[{session_id}] Utterance boundary ({len(frames)} smaples, "
+            f"{len(frames) / AudioPreprocessor.TARGET_SR:.2f}s). Dispatching inference."
+        )
+
+        threading.Thread(
+            target=self._run_utterance,
+            args=(
+                session_id,
+                utterance_bytes,
+                system_prompt,
+                outbound_queue,
+                context,
+                utterance_done_event,
+            ),
+            daemon=True,
+        ).start()
+
+    def _read_pump(self, request_iterator, session_id_holder, outbound_queue, context):
         system_prompt = None
         utterance_done_event = threading.Event()
         utterance_done_event.set()
 
+        vad = VADDetector(VAD_MODEL_PATH)
+        preprocessor = AudioPreprocessor(source_sr=SOURCE_SAMPLE_RATE)
+
         try:
             for event in request_iterator:
                 session_id_holder["id"] = event.session_id
+                session_id = session_id_holder["id"]
 
                 if event.HasField("control"):
                     control = event.control
@@ -109,59 +147,44 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                     if control.profile.system_prompt:
                         system_prompt = control.profile.system_prompt
                         logger.info(
-                            f"[{session_id_holder['id']}] Profile received — "
+                            f"[{session_id}] Profile received — "
                             f"agent: '{control.profile.agent_name}'"
                         )
 
                     if control.type == agent_pb2.ControlSignal.END_OF_UTTERANCE:
-                        if len(audio_buffer) == 0:
-                            logger.warning(
-                                f"[{session_id_holder['id']}] "
-                                f"END_OF_UTTERANCE received with empty buffer, ignoring."
-                            )
-                            continue
-
                         if not utterance_done_event.is_set():
-                            logger.warning(
-                                f"[{session_id_holder['id']}] "
-                                f"END_OF_UTTERANCE received while utterance in progress. "
-                                f"Waiting for current utterance to complete."
-                            )
                             utterance_done_event.wait()
 
-                        utterance_bytes = bytes(audio_buffer)
-                        audio_buffer.clear()
-                        utterance_done_event.clear()
-
-                        logger.info(
-                            f"[{session_id_holder['id']}] Utterance boundary received "
-                            f"({len(utterance_bytes)} bytes). Dispatching inference."
+                        self._dispatch_utterance(
+                            session_id, vad, system_prompt,
+                            outbound_queue, context, utterance_done_event,
                         )
 
-                        threading.Thread(
-                            target=self._run_utterance,
-                            args=(
-                                session_id_holder["id"],
-                                utterance_bytes,
-                                system_prompt,
-                                outbound_queue,
-                                context,
-                                utterance_done_event,
-                            ),
-                            daemon=True,
-                        ).start()
-
                 elif event.HasField("audio"):
-                    audio_buffer.extend(event.audio.data)
+                    for frame in preprocessor.push(event.audio.data):
+                        command = vad.process_frames(frame)
+
+                        if command == VADCommand.START_SPEECH:
+                            logger.info(f"[{session_id}] VAD: speech started.")
+
+                        elif command == VADCommand.END_OF_UTTERANCE:
+                            if not utterance_done_event.is_set():
+                                logger.warning(
+                                    f"[{session_id}] VAD boundary while utterance "
+                                    f"in progress. Waiting."
+                                )
+                                utterance_done_event.wait()
+
+                            self._dispatch_utterance(
+                                session_id, vad, system_prompt,
+                                outbound_queue, context, utterance_done_event,
+                            )
 
         except Exception as e:
-            logger.error(
-                f"[{session_id_holder['id']}] read_pump failure: {e}", exc_info=True
-            )
+            logger.error(f"[{session_id_holder['id']}] read_pump failure: {e}", exc_info=True)
         finally:
             logger.info(
-                f"[{session_id_holder['id']}] Inbound stream closed. "
-                f"Signaling shutdown."
+                f"[{session_id_holder['id']}] Inbound stream closed. Signaling shutdown."
             )
             outbound_queue.put(_SHUTDOWN)
 
@@ -198,7 +221,6 @@ def serve():
     agent_pb2_grpc.add_VoiceAgentServicer_to_server(VoiceAgentServicer(), server)
     server.add_insecure_port("[::]:50051")
     logger.info("Inference Engine running on port :50051")
-
     server.start()
 
     def handle_shutdown(signum, frame):
@@ -208,7 +230,6 @@ def serve():
 
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
-
     server.wait_for_termination()
 
 
