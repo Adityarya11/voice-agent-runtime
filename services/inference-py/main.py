@@ -111,7 +111,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         utterance_done_event.clear()
 
         logger.info(
-            f"[{session_id}] Utterance boundary ({len(frames)} frames, "
+            f"[{session_id}] Utterance boundary ({len(frames)} smaples, "
             f"{len(frames) / AudioPreprocessor.TARGET_SR:.2f}s). Dispatching inference."
         )
 
