@@ -179,6 +179,15 @@ SPEECH_ENDING` over raw per-frame Silero output.
 - Verified: two utterances on one open stream, VAD-detected boundaries,
   correct transcriptions, sequential gating, clean shutdown on both sides.
 
+### VAD Integration — Milestone 4: Tuning and Edge Cases (completed)
+
+[PR#11](https://github.com/Adityarya11/voice-agent-runtime/pull/11)
+
+- Silence-only stream, false-start noise burst, back-to-back utterances
+  with state persistence verified.
+- Remove Go's explicit `END_OF_UTTERANCE` send once VAD is proven reliable
+  end to end.
+
 ---
 
 ## Active Backlog
@@ -193,13 +202,6 @@ SPEECH_ENDING` over raw per-frame Silero output.
   - Not Gonna happen as TTS Latency(s) > gRPC network call(ms).
 - Verify `_run_utterance` temp file cleanup under all exit paths,
   including `context.is_active()` early return.
-
-### VAD Integration — Milestone 4: Tuning and Edge Cases
-
-- Silence-only stream, false-start noise burst, back-to-back utterances
-  with state persistence verified.
-- Remove Go's explicit `END_OF_UTTERANCE` send once VAD is proven reliable
-  end to end.
 
 ### Monitor Goroutine (Go)
 
@@ -273,3 +275,5 @@ serialization.
 - [`docs/true_duplex.md`](../docs/true_duplex.md) — True Duplex
   implementation design, milestone breakdown, and architectural decisions
   _(to be written after milestone 4 completes)_
+
+- [`docs/vad.md`](../docs/vad.md) - Complete Vad Integration
