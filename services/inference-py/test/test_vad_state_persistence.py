@@ -1,65 +1,95 @@
+"""Confirms RNN state genuinely carries context across an utterance boundary,
+by comparing model output on the identical frame under two different prior
+states rather than merely checking the state isn't all-zeros."""
+
 import os
 import sys
+import wave
+
 import numpy as np
+import scipy.signal
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from vad import VADDetector, VADCommand
+from vad import VADCommand, VADDetector
 
 VAD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "silero_vad.onnx")
+SOURCE_WAV = os.path.join(os.path.dirname(__file__), "..", "..", "..", "test_data", "input_1.wav")
+TARGET_SR = 16000
+FRAME_SIZE = 512
+
+SILENCE_REGION_SEC = (0.0, 0.48)
+SPEECH_REGION_SEC = (1.28, 1.60)
+
+
+def load_and_resample(path: str) -> np.ndarray:
+    with wave.open(path, "rb") as wf:
+        original_sr = wf.getframerate()
+        raw_bytes = wf.readframes(wf.getnframes())
+
+    audio_float = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    if original_sr == TARGET_SR:
+        return audio_float
+
+    gcd = np.gcd(TARGET_SR, original_sr)
+    return scipy.signal.resample_poly(
+        audio_float, TARGET_SR // gcd, original_sr // gcd
+    ).astype(np.float32)
+
+
+def slice_frames(audio: np.ndarray, start_sec: float, end_sec: float) -> list:
+    region = audio[int(start_sec * TARGET_SR):int(end_sec * TARGET_SR)]
+    num_frames = len(region) // FRAME_SIZE
+    return [region[i * FRAME_SIZE:(i + 1) * FRAME_SIZE] for i in range(num_frames)]
+
 
 def test_rnn_state_persistence():
-    # Build baseline fresh instance that remains untouched to map initial zero state structure
-    baseline_detector = VADDetector(VAD_MODEL_PATH)
-    initial_zero_state = baseline_detector._state.copy()
-    
-    # Primary evaluation unit
-    primary_detector = VADDetector(VAD_MODEL_PATH, min_speech_duration=64, min_silence_duration=64)
-    
-    # Mocking real acoustic behavior sequentially:
-    # Utterance 1 Speech (10 frames) -> Utterance 1 Silence (10 frames) -> 
-    # Utterance 2 Speech (10 frames) -> Utterance 2 Silence (10 frames)
-    scores = ([0.95] * 10) + ([0.02] * 10) + ([0.95] * 10) + ([0.02] * 10)
-    score_idx = 0
-    
-    original_infer = primary_detector._infer
-    def mock_infer(frame):
-        nonlocal score_idx
-        score = scores[score_idx]
-        score_idx += 1
-        # Execute real inference to let ONNX update the raw hidden math state variables
-        _, hidden_state = original_infer(frame)
-        return score, hidden_state
+    audio = load_and_resample(SOURCE_WAV)
+    silence_frames = slice_frames(audio, *SILENCE_REGION_SEC)
+    speech_frames = slice_frames(audio, *SPEECH_REGION_SEC)
 
-    primary_detector._infer = mock_infer
+    utterance_1 = speech_frames + silence_frames * 3
+    utterance_2_first_frame = speech_frames[0]
 
-    start_speech_count = 0
-    end_utterance_count = 0
-    captured_mid_sequence_state = None
+    primary = VADDetector(VAD_MODEL_PATH, min_speech_duration=64, min_silence_duration=64)
 
-    for _ in range(len(scores)):
-        dummy_frame = np.zeros(512, dtype=np.float32)
-        command = primary_detector.process_frames(dummy_frame)
-        
+    start_count = 0
+    end_count = 0
+    state_after_utterance_1 = None
+
+    for frame in utterance_1:
+        command = primary.process_frames(frame)
         if command == VADCommand.START_SPEECH:
-            start_speech_count += 1
+            start_count += 1
         elif command == VADCommand.END_OF_UTTERANCE:
-            end_utterance_count += 1
-            # Capture the exact mathematical RNN context block state right at the turn boundary
-            if end_utterance_count == 1:
-                captured_mid_sequence_state = primary_detector._state.copy()
+            end_count += 1
+            state_after_utterance_1 = primary._state.copy()
 
-    print(f"[TEST PERSISTENCE] Total START_SPEECH: {start_speech_count}, Total END_OF_UTTERANCE: {end_utterance_count}")
-    
-    # Assertions
-    assert start_speech_count == 2, f"Expected exactly 2 conversational entries, got {start_speech_count}"
-    assert end_utterance_count == 2, f"Expected exactly 2 turn completions, got {end_utterance_count}"
-    assert captured_mid_sequence_state is not None, "Failed to capture turn boundary matrix state profile."
-    
-    # Prove that the mid-sequence state contains non-zero history tracking
-    state_is_mutated = not np.array_equal(captured_mid_sequence_state, initial_zero_state)
-    assert state_is_mutated, "VAD Context Leak! The RNN state array was wiped or reset back to zero at the turn boundary!"
-    
-    print("✅ test_vad_state_persistence PASSED.")
+    print(f"[TEST PERSISTENCE] START_SPEECH: {start_count}, END_OF_UTTERANCE: {end_count}")
+    assert start_count == 1, f"Expected one confirmed utterance start, got {start_count}"
+    assert end_count == 1, f"Expected one utterance boundary, got {end_count}"
+    assert state_after_utterance_1 is not None, "Boundary never captured a state snapshot."
+
+    # Feed the identical first frame of utterance 2 into two independent detectors:
+    # one carrying utterance 1's history forward, one starting fresh at zero state.
+    # If the model produces different scores on the same frame, state is genuinely
+    # influencing behavior across the boundary -- not just present, but load-bearing.
+    primary._state = state_after_utterance_1
+    score_with_history, _ = primary._infer(utterance_2_first_frame)
+
+    fresh = VADDetector(VAD_MODEL_PATH)
+    score_fresh, _ = fresh._infer(utterance_2_first_frame)
+
+    print(f"[TEST PERSISTENCE] Score with carried context: {score_with_history:.4f}")
+    print(f"[TEST PERSISTENCE] Score from zero-state detector: {score_fresh:.4f}")
+
+    assert not np.isclose(score_with_history, score_fresh, atol=1e-4), (
+        "VAD Context Leak! Identical frame produced identical score regardless "
+        "of prior state -- state is not meaningfully influencing inference."
+    )
+
+    print("PASS: test_vad_state_persistence")
+
 
 if __name__ == "__main__":
     test_rnn_state_persistence()
