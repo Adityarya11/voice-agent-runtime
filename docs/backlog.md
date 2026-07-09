@@ -4,32 +4,22 @@
 
 ### 1. Dynamic Profiling
 
-- `StreamEvents` in `main.py` reads the incoming `ControlSignal` before
-  processing audio chunks.
-- `system_prompt` from the agent profile YAML is extracted and passed
-  directly into `LLMEngine.generate()` via `system_override`.
-- Fallback system prompt in `engine.py` promoted to a named module-level
-  constant instead of an anonymous inline string.
-- Verified: LLM responds as the loaded agent persona, not as a generic
-  assistant.
+- `StreamEvents` in `main.py` reads the incoming `ControlSignal` before processing audio chunks.
+- `system_prompt` from the agent profile YAML is extracted and passed directly into `LLMEngine.generate()` via `system_override`.
+- Fallback system prompt in `engine.py` promoted to a named module-level constant instead of an anonymous inline string.
+- Verified: LLM responds as the loaded agent persona, not as a generic assistant.
 
 ---
 
 ### 2. Session Management
 
-- `session.go` rewritten from a passive data struct into an active
-  controller owning the gRPC stream reference via `Attach()`.
-- State machine enforced via a legal transition map protected by
-  `sync.Mutex`. Illegal transitions log an error and no-op — they never
-  panic or silently corrupt state.
-- `writePump()` goroutine owns all outbound gRPC sends. Drains
-  `UserAudioChan`, transitions to `PROCESSING` on exhaustion.
-- `readPump()` goroutine owns all inbound gRPC receives. Transitions to
-  `RESPONDING` on first audio chunk. Closes `AgentAudioChan` and
-  `DoneChan` on EOF.
-- `main.go` decoupled from gRPC entirely — feeds `UserAudioChan`,
-  reads `AgentAudioChan`, has no knowledge of stream internals.
+- `session.go` rewritten from a passive data struct into an active controller owning the gRPC stream reference via `Attach()`.
+- State machine enforced via a legal transition map protected by `sync.Mutex`. Illegal transitions log an error and no-op — they never panic or silently corrupt state.
+- `writePump()` goroutine owns all outbound gRPC sends. Drains `UserAudioChan`, transitions to `PROCESSING` on exhaustion.
+- `readPump()` goroutine owns all inbound gRPC receives. Transitions to `RESPONDING` on first audio chunk. Closes `AgentAudioChan` and `DoneChan` on EOF.
+- `main.go` decoupled from gRPC entirely - feeds `UserAudioChan`, reads `AgentAudioChan`, has no knowledge of stream internals.
 - `InterruptChan` allocated and reserved for future barge-in support.
+- `DoneChan` closure hardened with `sync.Once` via a `signalDone()` method - safe against multiple goroutines racing to signal session completion once the monitor goroutine lands.
 
 ---
 
@@ -49,190 +39,95 @@
 
 ---
 
-### 4. True Duplex — Milestone 1: Three-Worker Architecture
+### 4. True Duplex (all 4 milestones completed)
 
-- `main.py` rewritten from a sequential blocking handler into a
-  three-worker concurrent architecture.
-- `_read_pump` thread owns the inbound stream exclusively — no other
-  thread touches the audio buffer, eliminating the need for a mutex on
-  that resource through single-thread ownership.
-- Per-utterance `_run_utterance` daemon threads dispatched on boundary
-  signals — inference never blocks the listener.
-- Main thread drains a `queue.Queue` with an `object()` sentinel
-  (`_SHUTDOWN`) and yields to gRPC — the sole outbound path.
+Full design record, decisions, and milestone breakdown documented in
+[`docs/true_duplex.md`](true_duplex.md). Summary:
 
----
-
-### True Duplex — Milestone 2: Single Utterance Duplex Path
-
-[PR #6](https://github.com/Adityarya11/voice-agent-runtime/pull/6)
-
-- `END_OF_UTTERANCE` added to `ControlSignal.SignalType` as value `3`
-  in `agent.proto`. Proto regenerated on both Go and Python sides.
-- `session.go` state machine updated: `ACTIVE → RESPONDING` direct
-  transition added. `writePump` sends `END_OF_UTTERANCE` control signal
-  instead of calling `CloseSend()`. Stream stays open after utterance
-  boundary is signaled.
-- `context.is_active()` guard added to `_run_utterance` — in-flight
-  inference aborts cleanly when the gRPC context is cancelled mid-stream.
-- Verified across two shutdown scenarios:
-  - Python closed first: `_read_pump` catches `grpc.RpcError` on server
-    drain, hits `finally`, puts `_SHUTDOWN` sentinel, exits cleanly.
-  - Go closed first: `_read_pump` exhausts `request_iterator` naturally,
-    hits `finally`, exits cleanly. Python server remains alive and accepts
-    the next connection immediately.
-- Confirmed: Go stream stays open after `END_OF_UTTERANCE`. Python
-  detects boundary, dispatches inference on a daemon thread, streams
-  response back while stream remains bidirectional. Go transitions
-  `ACTIVE → RESPONDING` while the send side is still technically open.
+- Three-worker Python architecture (`_read_pump`, `_run_utterance`,
+  outbound relay) replacing the sequential blocking handler.
+- `END_OF_UTTERANCE` control signal added to proto; stream stays
+  bidirectionally open across the boundary instead of using `CloseSend()`.
+- `StreamUtterance()` on `session.go` sends a full utterance and its
+  boundary signal atomically, eliminating the channel-drain race that
+  caused audio bleeding between utterances.
+- `utterance_done_event` (`threading.Event`) gates sequential utterance
+  dispatch — verified with two distinct audio inputs on one open stream,
+  zero byte bleeding, correct and distinct responses.
+- Empty buffer guard, backpressure policy (deferred — TTS latency
+  exceeds gRPC send latency on current hardware), and temp file cleanup
+  verified as milestone 4.
 
 ---
 
-### True Duplex — Milestone 3: Sequential Utterance Processing (completed)
+### 5. VAD Integration (Milestones 1–4 completed)
 
-[PR#8](https://github.com/Adityarya11/voice-agent-runtime/pull/8)
+Full design record documented in [`docs/vad.md`](vad.md). Summary:
 
-- `StreamUtterance()` added to `session.go` — streams a WAV file directly
-  onto the gRPC stream and sends `END_OF_UTTERANCE` atomically after all
-  audio bytes are sent. Eliminates the channel-drain race condition that
-  caused audio bleeding between utterances when using `UserAudioChan` as
-  an intermediary buffer.
-- `UserAudioChan` and `writePump` removed from `Session` struct for this
-  test harness — sending is now handled directly by `StreamUtterance`,
-  preserving gRPC encapsulation without the concurrent-producer complexity
-  that caused ordering bugs.
-- `utterance_done_event` (`threading.Event`) added to `_read_pump` in
-  `main.py` — gates dispatch of new `_run_utterance` threads so only one
-  utterance is processed at a time. If `END_OF_UTTERANCE` arrives while
-  inference is in progress, `_read_pump` blocks until the current thread
-  completes before dispatching the next one.
-- Verified with two distinct audio inputs on one open stream:
-  - `input_1.wav` (440364 bytes) — earlier this caught halfway through the stt capture. and remaining bytes gor garbled in the next audio.
-  - `input_2.wav` (391212 bytes) — Instead of starting from the actual, start of the audio 2, it started with the leftovers of the `input_1` and thus got garbled.
-    - Solved using `utteranch_done_event`.
-  - Both transcriptions correct, LLM responses coherent and distinct,
-    zero byte bleeding between utterance buffers.
-  - Sequential gate confirmed via "END_OF_UTTERANCE received while
-    utterance in progress. Waiting" log line.
-
----
-
-### True Duplex — Milestone 4: Polish and Edge Cases (Partial)
-
-- Empty utterance buffer guard implemented and verified. Rogue `END_OF_UTTERANCE` control signals arriving before any audio chunks are caught and explicitly ignored, preventing downstream STT crashes or state corruption.
-- Performance and latency benchmarks recorded under throttled hardware constraints (RTX 3050 Mobile):
-  - **LLM TTFT (Time To First Token):** ~0.45s – 0.58s.
-  - **TTS Generation:** ~2.12s cold start for the initial chunk; drops to ~0.06s – 0.10s for subsequent sentence chunks once the model is warm.
-  - **STT (Faster-Whisper):** ~1.09s for initial audio; drops to ~0.63s on immediately subsequent utterances.
-
-### VAD Integration — Milestone 1: Standalone Model Verification (completed)
-
-- **[test_vad_standalone.py](../examples/test_vad_standalone.py)**
-- Silero VAD ONNX model loaded via `onnxruntime`, downloaded directly rather
-  than via the `silero-vad` package to keep dependencies minimal.
-- Verified against `input_1.wav`: silence frames consistently score under
-  0.1, speech frames consistently score above 0.5. Confirmed model input
-  contract is a single unified `(2, 1, 128)` state tensor plus explicit
-  `sr` input, not separate `h`/`c` tensors as initially assumed.
-- Frame math verified: 512 samples at 16kHz = 32ms per frame.
-
-### VAD Integration — Milestone 2: Four-State Debounce Machine (completed)
-
-[PR#9](https://github.com/Adityarya11/voice-agent-runtime/pull/9)
-
-- `vad/detector.py` implements `SILENCE -> SPEECH_STARTING -> SPEECH ->
-SPEECH_ENDING` over raw per-frame Silero output.
-- Recurrent state persists across utterances within a session; `reset()`
-  is reserved for session boundaries only.
-- Validation history: tiling real audio segments to build a synthetic
-  test sequence was attempted first and rejected -- looped splicing
-  introduced waveform discontinuities the model read as transients,
-  producing false SPEECH_STARTING/SILENCE oscillation. A live human
-  recording was attempted next; the intended sub-500ms breath pause
-  measured closer to 1100ms in practice, correctly triggering two
-  utterance boundaries -- confirming detector correctness, not failure.
-- Final validation: two real speech segments from `input_1.wav` joined
-  by an exact 400ms digital silence gap and a trailing 1000ms silence.
-  Result: one `START_SPEECH`, no boundary at the 400ms gap (below the
-  500ms threshold), one `END_OF_UTTERANCE` during the trailing silence.
-- Parameters confirmed: `threshold=0.5`, `min_speech_duration_ms=250`,
-  `min_silence_duration_ms=500`.
-
-### VAD Integration — Milestone 3: Pipeline Integration (completed)
-
-[PR#10](https://github.com/Adityarya11/voice-agent-runtime/pull/10)
-
-- `vad/preprocessor.py` added — `AudioPreprocessor` handles bytes-to-frames:
-  raw PCM bytes → int16 → float32 normalize → `resample_poly` to 16kHz →
-  512-sample frames, carrying remainder across calls.
-- `vad/audio.py` added — `frames_to_wav` converts VAD utterance frames
-  (float32 numpy array) to a valid in-memory WAV file at 16kHz for STT.
-- `main.py` updated — `_read_pump` instantiates `VADDetector` and
-  `AudioPreprocessor` per session (stateful, not shared across sessions).
-  VAD boundary and Go manual override both call `_dispatch_utterance`,
-  which calls `vad.get_utterance_frames()` and `frames_to_wav()` before
-  handing bytes to `_run_utterance`. Old raw `audio_buffer` bytearray
-  removed entirely — audio accumulation now lives inside `VADDetector`.
-- `SOURCE_SAMPLE_RATE = 44100` is a module-level constant scoped to the
-  test harness. Will become a per-session parameter when AetherRTC lands
-  with its 8kHz G.711 stream.
-- Verified: two utterances on one open stream, VAD-detected boundaries,
-  correct transcriptions, sequential gating, clean shutdown on both sides.
-
-### VAD Integration — Milestone 4: Tuning and Edge Cases (completed)
-
-[PR#11](https://github.com/Adityarya11/voice-agent-runtime/pull/11)
-
-- Silence-only stream, false-start noise burst, back-to-back utterances
-  with state persistence verified.
-- Remove Go's explicit `END_OF_UTTERANCE` send once VAD is proven reliable
-  end to end.
+- Silero VAD via ONNX (`onnxruntime` directly, not the `silero-vad`
+  wrapper). Real model contract confirmed: unified `(2, 1, 128)` state
+  tensor plus explicit `sr` input.
+- Four-state debounce machine (`SILENCE -> SPEECH_STARTING -> SPEECH ->
+SPEECH_ENDING`) in `vad/detector.py`, validated against real recorded
+  audio after a tiling-based synthetic test method was tried and
+  rejected for introducing false transients.
+- `vad/preprocessor.py` and `vad/audio.py` handle byte-to-frame
+  conversion and frame-to-WAV conversion respectively, keeping
+  `VADDetector` a pure state machine with no gRPC or byte-handling
+  knowledge.
+- `_read_pump` instantiates `VADDetector` and `AudioPreprocessor` fresh
+  per session — both are stateful and must not be shared across calls.
+- Lookback buffer (`collections.deque`, ~320ms) added to capture the
+  phonetic onset of speech that occurs before the debounce threshold
+  confirms an utterance start.
+- Max utterance duration ceiling (`max_utterance_sec`, default 15s)
+  added as an OOM safeguard against unbounded speech accumulation.
+- Verified against three isolated test scripts: false start (noise
+  burst below `min_speech_duration_ms` correctly produces zero
+  boundaries), the ramble (sustained speech past `max_utterance_sec`
+  correctly forces one boundary at the expected frame index), and state
+  persistence (identical audio frame scores differently depending on
+  prior context, proving RNN state is not reset between utterances and
+  is genuinely influencing inference).
+- **Not yet done:** running the full pipeline end-to-end with Go's
+  manual `END_OF_UTTERANCE` override removed, confirming VAD alone
+  drives utterance boundaries in a live two-utterance session. Tracked
+  below.
 
 ---
 
 ## Active Backlog
 
-### True Duplex — Milestone 4: Polish and Edge Cases
+### 1. VAD: Sever the Manual Override
 
-**Priority:** Follows milestone 3.
+**Priority:** High. Next task.
 
-- Backpressure: define behavior when `outbound_queue` grows beyond a
-  threshold (inference faster than Go can consume — unlikely on current
-  hardware but needs a defined policy).
-  - Not Gonna happen as TTS Latency(s) > gRPC network call(ms).
-- Verify `_run_utterance` temp file cleanup under all exit paths,
-  including `context.is_active()` early return.
+`vad/detector.py` is fully validated in isolation, but the full pipeline
+has not yet been run with Go's explicit signal removed. `StreamUtterance`
+in `session.go` currently streams audio and sends `END_OF_UTTERANCE`
+atomically as one unit — there are no separate lines to comment out in
+`cmd/main.go`; the signal is baked into the method itself. Severing it
+requires either a new `StreamAudioOnly` method or a boolean parameter on
+`StreamUtterance` to suppress the trailing signal.
 
-### Monitor Goroutine (Go)
+Critically: an idle gap between two audio-only streams (via sleep or
+otherwise) produces no frames for VAD to evaluate — silence must be
+detected by the debounce machine, not inferred from elapsed time. To
+prove VAD alone can separate two utterances, the test harness must
+stream a real block of zeroed PCM samples (silence) between `input_1.wav`
+and `input_2.wav`, exceeding `min_silence_duration_ms` (500ms), so the
+detector has real audio to transition `SPEECH_ENDING -> SILENCE` against.
 
-**Priority:** High before AetherRTC integration.
+Once verified end to end with zero signals from Go, decide whether to
+delete the manual override path from `main.py` entirely or retain it as
+a documented debug/testing affordance.
 
-A third goroutine inside `Session.Run()` watching for:
+### 2. AetherRTC Integration
 
-- Context cancellation (caller disconnects).
-- Session timeout (inference stalls beyond a threshold).
-- Signal on `InterruptChan` (barge-in: user speaks while AI is speaking).
-
-On any of the above, the monitor must flush `AgentAudioChan`, cancel
-the active `readPump` receive, and transition the session back to
-`ACTIVE` to accept new audio.
-
-### DoneChan sync.Once Guard
-
-**Priority:** Medium. Implement alongside the monitor goroutine.
-
-`DoneChan` is currently closed only by `readPump` on EOF — correct for
-the happy path. Once the monitor goroutine can also signal session
-completion (timeout, context cancel), multiple goroutines could race to
-close `DoneChan`, which panics.
-
-Fix: wrap `close(s.DoneChan)` in a `sync.Once` stored on the session
-struct. Whichever goroutine reaches it first wins; subsequent calls are
-no-ops.
-
-### AetherRTC Integration
-
-**Priority:** Follows VAD integration and monitor goroutine.
+**Priority:** High. Can proceed in parallel with or immediately after
+the VAD override test above. Not blocked by the monitor goroutine —
+barge-in specifically depends on it, basic bidirectional audio routing
+does not.
 
 AetherRTC acts as the WebRTC edge gateway — terminates browser
 connections, forces G.711/PCMU at the edge to avoid Opus CGO overhead,
@@ -244,12 +139,34 @@ DISCONNECTED`. The Go orchestrator remains the sole state authority.
 Split-brain is avoided by design — AetherRTC has no knowledge of
 `PROCESSING`, `RESPONDING`, or any AI-layer state.
 
-Integration is blocked on VAD being in place, since without VAD the
-Python servicer has no mechanism to detect utterance boundaries from a
-continuous live audio stream, and AetherRTC will never send
-`END_OF_UTTERANCE` — it does not know what an utterance is.
+With VAD in place, the Python servicer no longer needs Go to send an
+explicit utterance boundary — it can derive boundaries from AetherRTC's
+continuous live audio stream directly. Open item before wiring this up:
+`SOURCE_SAMPLE_RATE` in `main.py` is currently a hardcoded 44100 constant
+matching the test harness's WAV files. AetherRTC forwards 8kHz G.711
+audio, so this needs to become either a per-session parameter negotiated
+at `START_SESSION`, or AetherRTC resamples before the gRPC bridge.
 
-### Concurrent Ordered Utterance Processing
+Project has been migrated from GitHub to GitLab; README's companion
+project link needs updating once the new location is finalized.
+
+### 3. Monitor Goroutine (Go)
+
+**Priority:** Medium. Deferred until a single-user end-to-end path
+(VAD alone + AetherRTC basic routing) is fully verified. Only barge-in
+requires this — nothing in basic AetherRTC audio routing does.
+
+A third goroutine inside `Session.Run()` watching for:
+
+- Context cancellation (caller disconnects).
+- Session timeout (inference stalls beyond a threshold).
+- Signal on `InterruptChan` (barge-in: user speaks while AI is speaking).
+
+On any of the above, the monitor must flush `AgentAudioChan`, cancel
+the active `readPump` receive, and transition the session back to
+`ACTIVE` to accept new audio.
+
+### 4. Concurrent Ordered Utterance Processing
 
 **Priority:** Low. Future enhancement, not current scope.
 
@@ -266,14 +183,24 @@ This becomes relevant when barge-in is in scope and real-time
 responsiveness to overlapping speech matters more than strict
 serialization.
 
+### Phase 2: Extensibility and Tool Calling (deferred, tracked only)
+
+**Priority:** Not scoped yet. Explicitly out of Phase 1.
+
+Tool calling, third-party integrations (Gmail, database-backed user
+state), and broader agent extensibility are intentionally deferred to a
+dedicated design discussion once Phase 1 (single-user, VAD-driven,
+AetherRTC-connected voice pipeline) is complete and stable. Noted here
+so the intent isn't lost, not to be expanded until that discussion
+happens.
+
 ---
 
 ## Reference Documents
 
-- [`docs/HLD.md`](../docs/HLD.md) — High Level Design
-- [`docs/LLD.md`](../docs/LLD.md) — Low Level Design
-- [`docs/true_duplex.md`](../docs/true_duplex.md) — True Duplex
-  implementation design, milestone breakdown, and architectural decisions
-  _(to be written after milestone 4 completes)_
-
-- [`docs/vad.md`](../docs/vad.md) - Complete Vad Integration
+- [`docs/HLD.md`](HLD.md) — High Level Design
+- [`docs/LLD.md`](LLD.md) — Low Level Design
+- [`docs/true_duplex.md`](true_duplex.md) — True Duplex implementation
+  design, milestone breakdown, and architectural decisions
+- [`docs/vad.md`](vad.md) — VAD integration design, milestone breakdown,
+  and architectural decisions

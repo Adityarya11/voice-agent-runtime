@@ -10,10 +10,10 @@ power a real estate consultant or an admissions counselor. Only the YAML
 profile changes.
 
 > **Status: Active development.** The gRPC bridge, local inference pipeline,
-> dynamic agent profiling, session state management, and token-streaming
-> response generation are functional. The runtime currently operates in
-> half-duplex mode. True bidirectional duplex, VAD-gated speech detection,
-> and a barge-in monitor are in progress. Public MVP and latency benchmarks
+> dynamic agent profiling, session state management, true bidirectional
+> duplex, and VAD-gated speech boundary detection are all functional and
+> verified. A monitor goroutine for barge-in handling and the AetherRTC
+> WebRTC bridge are in progress. Public MVP and latency benchmarks
 > targeted for **[07/2026]**.
 
 ---
@@ -33,6 +33,10 @@ machine design, is documented in:
 
 - [`docs/HLD.md`](docs/HLD.md) — High Level Design
 - [`docs/LLD.md`](docs/LLD.md) — Low Level Design
+- [`docs/true_duplex.md`](docs/true_duplex.md) — True duplex design and
+  milestone breakdown
+- [`docs/vad.md`](docs/vad.md) — VAD integration design and milestone
+  breakdown
 
 ---
 
@@ -43,8 +47,7 @@ machine design, is documented in:
 │           GO ORCHESTRATOR           │
 │                                     │
 │  Session lifecycle, state machine,  │
-│  channel-based audio routing,       │
-│  writePump / readPump goroutines    │
+│  bidirectional duplex streaming     │
 │                                     │
 └──────────────┬──────────────────────┘
                │ gRPC bidirectional stream
@@ -53,6 +56,7 @@ machine design, is documented in:
 ┌─────────────────────────────────────┐
 │       PYTHON INFERENCE ENGINE       │
 │                                     │
+│  Silero VAD (ONNX, boundary detect) │
 │  Faster-Whisper (STT, CPU)          │
 │  Ollama qwen2.5:3b (LLM, GPU)       │
 │  Piper TTS (TTS, CPU)               │
@@ -76,7 +80,7 @@ AetherRTC is a standalone WebRTC Edge Media Gateway built in Go (using Pion). It
 - Handling all media codecs at the edge (forcing G.711/PCMU to avoid heavy Opus CGO decoding).
 - Streaming clean, raw PCM audio bytes directly into the Voice Orchestrator via an internal gRPC bridge.
 
-This 3-tier service mesh design ensures the Voice Agent Runtime remains strictly focused on AI orchestration and session state, entirely ignorant of how the audio arrived.
+This 3-tier service mesh design ensures the Voice Agent Runtime remains strictly focused on AI orchestration and session state, entirely ignorant of how the audio arrived. With VAD now integrated, the orchestrator no longer needs to send an explicit end-of-utterance signal — AetherRTC can forward a continuous live audio stream and the inference engine derives utterance boundaries on its own.
 
 ---
 
@@ -88,6 +92,7 @@ decision reflects that constraint rather than ignoring it.
 
 | Stage | Component             | Device | Footprint       |
 | ----- | --------------------- | ------ | --------------- |
+| VAD   | Silero VAD (ONNX)     | CPU    | negligible VRAM |
 | STT   | Faster-Whisper (int8) | CPU    | negligible VRAM |
 | LLM   | qwen2.5:3b via Ollama | GPU    | ~2.2GB VRAM     |
 | TTS   | Piper                 | CPU    | negligible VRAM |
@@ -102,18 +107,18 @@ accidental.
 - [x] gRPC bidirectional stream between Go orchestrator and Python inference engine
 - [x] Full STT → LLM → TTS inference pipeline running locally, no external API calls
 - [x] Dynamic agent profiling — system prompts flow from YAML configs through the proto contract into the LLM at session start
-- [x] Session state machine in Go with mutex-protected, validated transitions (`CREATED → CONNECTING → ACTIVE → PROCESSING → RESPONDING → TERMINATED`)
-- [x] Decoupled I/O — `writePump` and `readPump` goroutines own all gRPC traffic, isolating orchestration logic from transport internals
+- [x] Session state machine in Go with mutex-protected, validated transitions, hardened with a `sync.Once` guard against concurrent completion signals
 - [x] Token-streaming LLM responses with sentence-boundary chunking — TTS begins synthesizing the first sentence while the LLM is still generating later sentences
+- [x] True bidirectional duplex — the gRPC stream stays open across utterance boundaries with no `CloseSend()`, verified with sequential multi-utterance sessions and zero audio bleeding
+- [x] VAD-gated utterance boundary detection — a four-state debounce machine over Silero VAD (ONNX) replaces explicit boundary signals, with a lookback buffer and max-duration safeguard, validated against false starts, sustained speech, and cross-utterance state persistence
 
 ## What's in progress
 
-- [ ] True bidirectional duplex (currently half-duplex — Go sends all audio, closes send, then waits)
-- [ ] VAD-gated speech boundary detection so inference can begin before the caller finishes speaking
+- [ ] Removing the manual `END_OF_UTTERANCE` override from the Go test harness now that VAD is independently validated
 - [ ] Monitor goroutine for barge-in handling, timeout detection, and context cancellation
-- [ ] `sync.Once` guard on session completion signaling to safely support multiple completion sources
-- [ ] Per-stage latency instrumentation (STT, LLM time-to-first-token, TTS, end-to-end) and a recorded demo
+- [ ] AetherRTC WebRTC bridge connecting live browser audio to the orchestrator
 - [ ] Removal of the temp-file boundary in Python STT in favor of true streaming transcription
+- [ ] A recorded end-to-end demo
 
 ---
 
@@ -125,12 +130,14 @@ voice-runtime/
 │   └── agent.proto              # Unified Event contract (audio | transcript | control)
 ├── services/
 │   ├── orchestrator-go/         # Control plane — session lifecycle, gRPC client
-│   └── inference-py/            # Data plane — STT, LLM, TTS pipeline
+│   └── inference-py/            # Data plane — VAD, STT, LLM, TTS pipeline
 ├── configs/
 │   └── agent_profiles/          # YAML-defined agent personas
 ├── docs/
 │   ├── HLD.md
 │   ├── LLD.md
+│   ├── true_duplex.md
+│   ├── vad.md
 │   └── backlog.md               # Detailed engineering log and architectural debt tracker
 └── test_data/                   # Sample input/output audio for local testing
 ```
