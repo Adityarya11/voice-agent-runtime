@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -97,42 +98,42 @@ func main() {
 
 	go currentSession.Run()
 
-	// ── MILESTONE 4 EMPTY BUFFER GUARD TEST ──────────────────────────────────
-	// Sends a rogue END_OF_UTTERANCE before any audio has been buffered.
-	// Expected: Python logs a warning and continues. No crash, no state corruption.
-	// Remove this block before production use.
-	logWarn("[M4-TEST] Sending rogue END_OF_UTTERANCE with empty buffer...")
-	if err := currentSession.StreamUtterance(""); err == nil {
-		// StreamUtterance with empty path will fail at os.Open — handle below instead
+	// M4-TEST: manual END_OF_UTTERANCE override, verified in true-duplex
+	// milestone 4 (empty-buffer guard). Left disabled since VAD milestone 4
+	// proved boundaries fire correctly without it -- see docs/vad.md.
+	// logWarn("[M4-TEST] Sending rogue END_OF_UTTERANCE with empty buffer...")
+	// err = stream.Send(&pb.Event{
+	// 	SessionId: currentSession.ID,
+	// 	Payload: &pb.Event_Control{
+	// 		Control: &pb.ControlSignal{
+	// 			Type: pb.ControlSignal_END_OF_UTTERANCE,
+	// 		},
+	// 	},
+	// })
+	// if err != nil {
+	// 	logWarn("[M4-TEST] Rogue signal send error: %v", err)
+	// }
+
+	log.Println("[Orchestrator] Streaming utterance 1 (VAD-only boundary detection)...")
+	if err := currentSession.StreamAudio("../../test_data/input_1.wav"); err != nil {
+		log.Fatalf("[Orchestrator] Utterance 1 audio failed: %v", err)
 	}
 
-	// Send the control signal directly since there is no audio to stream
-	err = stream.Send(&pb.Event{
-		SessionId: currentSession.ID,
-		Payload: &pb.Event_Control{
-			Control: &pb.ControlSignal{
-				Type: pb.ControlSignal_END_OF_UTTERANCE,
-			},
-		},
-	})
-	if err != nil {
-		logWarn("[M4-TEST] Rogue signal send error: %v", err)
+	log.Println("[Orchestrator] Injecting silence gap...")
+	if err := currentSession.StreamSilence(700); err != nil {
+		log.Fatalf("[Orchestrator] Silence injection failed: %v", err)
 	}
-	logInfo("[M4-TEST] Rogue END_OF_UTTERANCE sent. Waiting for Python to acknowledge...")
-	// ── END MILESTONE 4 TEST ──────────────────────────────────────────────────
 
-	logInfo("Streaming utterance 1...")
-	if err := currentSession.StreamUtterance("../../test_data/input_1.wav"); err != nil {
-		logFatal("Utterance 1 failed: %v", err)
+	log.Println("[Orchestrator] Streaming utterance 2 (VAD-only boundary detection)...")
+	if err := currentSession.StreamAudio("../../test_data/input_2.wav"); err != nil {
+		log.Fatalf("[Orchestrator] Utterance 2 audio failed: %v", err)
 	}
-	logInfo("Utterance 1 complete.")
 
-	logInfo("Streaming utterance 2...")
-	if err := currentSession.StreamUtterance("../../test_data/input_2.wav"); err != nil {
-		logFatal("Utterance 2 failed: %v", err)
+	log.Println("[Orchestrator] Injecting trailing silence to close utterance 2...")
+	if err := currentSession.StreamSilence(700); err != nil {
+		log.Fatalf("[Orchestrator] Trailing silence failed: %v", err)
 	}
-	logInfo("Utterance 2 complete.")
 
 	<-currentSession.DoneChan
-	logInfo("Both utterances processed. Session complete.")
+	logInfo("VAD autonomy test complete. Session closed.")
 }

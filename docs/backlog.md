@@ -89,40 +89,45 @@ SPEECH_ENDING`) in `vad/detector.py`, validated against real recorded
   persistence (identical audio frame scores differently depending on
   prior context, proving RNN state is not reset between utterances and
   is genuinely influencing inference).
-- **Not yet done:** running the full pipeline end-to-end with Go's
-  manual `END_OF_UTTERANCE` override removed, confirming VAD alone
-  drives utterance boundaries in a live two-utterance session. Tracked
-  below.
+- [Milestone 4](backlog.md/#vad-sever-the-manual-override-completed)
+
+### → VAD: Sever the Manual Override (completed)
+
+`main.go`'s test harness no longer sends any `END_OF_UTTERANCE` control
+signal. `StreamAudio` (audio only, no boundary) and `StreamSilence`
+(explicit zeroed PCM injection) added to `session.go`, factored through
+a shared `sendAudioChunk` helper alongside the existing `StreamUtterance`
+-- no duplicated chunking logic, no test-only flags added to the
+production session API.
+
+`StreamAudio`/`StreamSilence` are not test-only scaffolding: they are
+the shape AetherRTC's bridge will actually need, since a live caller
+never has a discrete "utterance" to hand the session -- only continuous
+audio, with all boundary detection left entirely to VAD.
+
+One real bug surfaced during this test, worth preserving: the first run
+appeared to fail (LLM generation aborted mid-utterance via the
+`context.is_active()` guard) despite VAD correctly detecting both
+boundaries. Root cause was not VAD -- it was `stream.CloseSend()`
+called immediately after the second silence injection, which caused
+`_read_pump`'s `finally` block to unconditionally shut down the outbound
+queue the moment inbound input ended, without checking for an in-flight
+inference thread. Removing `CloseSend()` (and instead holding the stream
+open until manual shutdown, same pattern as true-duplex milestone 2)
+resolved it. Confirmed both utterances now complete in full with zero
+signals sent from Go.
+
+Known limitation carried forward, not fixed here: `_read_pump` does not
+currently support half-close -- input ending and response completion
+are not independently tracked. A real caller disconnecting mid-response
+will hit the same premature cutoff. Revisit alongside the monitor
+goroutine.
 
 ---
 
 ## Active Backlog
 
-### 1. VAD: Sever the Manual Override
-
-**Priority:** High. Next task.
-
-`vad/detector.py` is fully validated in isolation, but the full pipeline
-has not yet been run with Go's explicit signal removed. `StreamUtterance`
-in `session.go` currently streams audio and sends `END_OF_UTTERANCE`
-atomically as one unit — there are no separate lines to comment out in
-`cmd/main.go`; the signal is baked into the method itself. Severing it
-requires either a new `StreamAudioOnly` method or a boolean parameter on
-`StreamUtterance` to suppress the trailing signal.
-
-Critically: an idle gap between two audio-only streams (via sleep or
-otherwise) produces no frames for VAD to evaluate — silence must be
-detected by the debounce machine, not inferred from elapsed time. To
-prove VAD alone can separate two utterances, the test harness must
-stream a real block of zeroed PCM samples (silence) between `input_1.wav`
-and `input_2.wav`, exceeding `min_silence_duration_ms` (500ms), so the
-detector has real audio to transition `SPEECH_ENDING -> SILENCE` against.
-
-Once verified end to end with zero signals from Go, decide whether to
-delete the manual override path from `main.py` entirely or retain it as
-a documented debug/testing affordance.
-
-### 2. AetherRTC Integration
+### 1. AetherRTC Integration
 
 **Priority:** High. Can proceed in parallel with or immediately after
 the VAD override test above. Not blocked by the monitor goroutine —
@@ -150,7 +155,7 @@ at `START_SESSION`, or AetherRTC resamples before the gRPC bridge.
 Project has been migrated from GitHub to GitLab; README's companion
 project link needs updating once the new location is finalized.
 
-### 3. Monitor Goroutine (Go)
+### 2. Monitor Goroutine (Go)
 
 **Priority:** Medium. Deferred until a single-user end-to-end path
 (VAD alone + AetherRTC basic routing) is fully verified. Only barge-in
@@ -166,7 +171,7 @@ On any of the above, the monitor must flush `AgentAudioChan`, cancel
 the active `readPump` receive, and transition the session back to
 `ACTIVE` to accept new audio.
 
-### 4. Concurrent Ordered Utterance Processing
+### 3. Concurrent Ordered Utterance Processing
 
 **Priority:** Low. Future enhancement, not current scope.
 

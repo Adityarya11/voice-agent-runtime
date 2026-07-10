@@ -108,11 +108,21 @@ func (s *Session) signalDone() {
 	})
 }
 
-func (s *Session) StreamUtterance(audioPath string) error {
+func (s *Session) sendAudioChunk(data []byte) error {
+	return s.stream.Send(&pb.Event{
+		SessionId: s.ID,
+		Payload: &pb.Event_Audio{
+			Audio: &pb.AudioChunk{Data: data},
+		},
+	})
+}
+
+func (s *Session) StreamAudio(audioPath string) error {
 	f, err := os.Open(audioPath)
 	if err != nil {
 		return fmt.Errorf("session %s: failed to open audio file: %v", s.ID, err)
 	}
+
 	defer f.Close()
 
 	buf := make([]byte, 4096)
@@ -121,13 +131,7 @@ func (s *Session) StreamUtterance(audioPath string) error {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			sendErr := s.stream.Send(&pb.Event{
-				SessionId: s.ID,
-				Payload: &pb.Event_Audio{
-					Audio: &pb.AudioChunk{Data: chunk},
-				},
-			})
-			if sendErr != nil {
+			if sendErr := s.sendAudioChunk(chunk); sendErr != nil {
 				return fmt.Errorf("session %s: audio send error: %v", s.ID, sendErr)
 			}
 		}
@@ -138,23 +142,45 @@ func (s *Session) StreamUtterance(audioPath string) error {
 			return fmt.Errorf("session %s: file read error: %v", s.ID, readErr)
 		}
 	}
+	log.Printf("[Session %s] Audio streamed from '%s' (no boundary signal).", s.ID, audioPath)
+	return nil
+}
+
+func (s *Session) StreamUtterance(audioPath string) error {
+	if err := s.StreamAudio(audioPath); err != nil {
+		return err
+	}
 
 	sendErr := s.stream.Send(&pb.Event{
 		SessionId: s.ID,
 		Payload: &pb.Event_Control{
-			Control: &pb.ControlSignal{
-				Type: pb.ControlSignal_END_OF_UTTERANCE,
-			},
+			Control: &pb.ControlSignal{Type: pb.ControlSignal_END_OF_UTTERANCE},
 		},
 	})
 	if sendErr != nil {
 		return fmt.Errorf("session %s: END_OF_UTTERANCE send error: %v", s.ID, sendErr)
 	}
+	log.Printf("[Session %s] Utterance streamed from '%s'. END_OF_UTTERANCE sent.", s.ID, audioPath)
+	return nil
+}
 
-	log.Printf(
-		"[Session %s] Utterance streamed from '%s'. END_OF_UTTERANCE sent.",
-		s.ID, audioPath,
-	)
+func (s *Session) StreamSilence(durationMs int) error {
+	const sampleRate = 44100
+	const bytesPerSample = 2
+	totalBytes := (sampleRate * bytesPerSample * durationMs) / 1000
+	silence := make([]byte, totalBytes)
+
+	chunkSize := 4096
+	for offset := 0; offset < len(silence); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(silence) {
+			end = len(silence)
+		}
+		if err := s.sendAudioChunk(silence[offset:end]); err != nil {
+			return fmt.Errorf("session %s: silence send error: %v", s.ID, err)
+		}
+	}
+	log.Printf("[Session %s] Streamed %dms of silence (%d bytes).", s.ID, durationMs, totalBytes)
 	return nil
 }
 
