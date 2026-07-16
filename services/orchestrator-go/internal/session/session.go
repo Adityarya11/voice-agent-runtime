@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -69,12 +70,10 @@ func (s *Session) transitionTo(next SessionState) error {
 		return fmt.Errorf("session %s: unknown current state '%s'", s.ID, s.State)
 	}
 
-	for _, valid := range allowed {
-		if valid == next {
-			log.Printf("[Session %s] %s -> %s", s.ID, s.State, next)
-			s.State = next
-			return nil
-		}
+	if slices.Contains(allowed, next) {
+		log.Printf("[Session %s] %s -> %s", s.ID, s.State, next)
+		s.State = next
+		return nil
 	}
 
 	return fmt.Errorf(
@@ -172,10 +171,7 @@ func (s *Session) StreamSilence(durationMs int) error {
 
 	chunkSize := 4096
 	for offset := 0; offset < len(silence); offset += chunkSize {
-		end := offset + chunkSize
-		if end > len(silence) {
-			end = len(silence)
-		}
+		end := min(offset+chunkSize, len(silence))
 		if err := s.sendAudioChunk(silence[offset:end]); err != nil {
 			return fmt.Errorf("session %s: silence send error: %v", s.ID, err)
 		}
@@ -186,6 +182,16 @@ func (s *Session) StreamSilence(durationMs int) error {
 
 func (s *Session) Run() {
 	s.readPump()
+}
+
+func (s *Session) handleAudioEvent(audio *pb.AudioChunk, firstChunk *bool) {
+	if *firstChunk {
+		if err := s.transitionTo(StateResponding); err != nil {
+			log.Printf("[Session %s] readPump transition error: %v", s.ID, err)
+		}
+		*firstChunk = false
+	}
+	s.AgentAudioChan <- audio.Data
 }
 
 func (s *Session) readPump() {
@@ -209,13 +215,7 @@ func (s *Session) readPump() {
 		}
 
 		if audio := event.GetAudio(); audio != nil {
-			if firstChunk {
-				if err := s.transitionTo(StateResponding); err != nil {
-					log.Printf("[Session %s] readPump transition error: %v", s.ID, err)
-				}
-				firstChunk = false
-			}
-			s.AgentAudioChan <- audio.Data
+			s.handleAudioEvent(audio, &firstChunk)
 		}
 	}
 }

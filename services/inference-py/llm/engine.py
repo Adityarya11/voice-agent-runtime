@@ -1,10 +1,10 @@
+import logging
 import re
 import time
-import logging
-import ollama
-
 from datetime import datetime
-import time
+
+import httpx
+import ollama
 
 logger = logging.getLogger("InferenceEngine.LLM")
 
@@ -12,7 +12,7 @@ _FALLBACK_SYSTEM_PROMPT = (
     "You are a concise voice assistant. Limit replies to two sentences maximum."
 )
 
-_SENTENCE_ENDINGS = re.compile(r'[.!?]')
+_SENTENCE_ENDINGS = re.compile(r"[.!?]")
 _MIN_CHUNK_LENGTH = 8
 
 
@@ -26,7 +26,7 @@ class LLMEngine:
         try:
             ollama.show(model=self.model_target)
             logger.info(f"Model '{self.model_target}' verified.")
-        except Exception:
+        except (ollama.ResponseError, httpx.RequestError):
             logger.warning(
                 f"Model '{self.model_target}' could not be verified. "
                 f"Ensure 'ollama pull {self.model_target}' has been run."
@@ -41,27 +41,41 @@ class LLMEngine:
         ]
 
         try:
-            start_time = time.time()
-            response = ollama.chat(
-                model=self.model_target,
-                messages=messages,
-                stream=False
-            )
-            latency = time.time() - start_time
-            content = response.get("message", {}).get("content", "").strip()
-            logger.info(f"Inference completed in {latency:.3f}s")
-            return content
-        except Exception as e:
+            response = ollama.chat(model=self.model_target, messages=messages)
+            return response.get("message", {}).get("content", "")
+        except (ollama.ResponseError, httpx.RequestError) as e:
             logger.error(f"Inference failure: {e}", exc_info=True)
-            return "I encountered an error processing your request. Please try again."
+            return "I encountered an error processing your request."
+
+    def _log_ttft(self, request_start: float):
+        ttft = time.perf_counter() - request_start
+        logger.info(
+            f"First token at "
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} "
+            f"(TTFT: {ttft:.3f}s)"
+        )
+
+    def _extract_sentences(self, buffer: str) -> tuple[list[str], str]:
+        """Extracts complete sentences from the buffer and returns them alongside the remaining text."""
+        sentences = []
+        while True:
+            if len(buffer) < _MIN_CHUNK_LENGTH:
+                break
+
+            match = _SENTENCE_ENDINGS.search(buffer, _MIN_CHUNK_LENGTH)
+            if not match:
+                break
+
+            end_index = match.end()
+            sentence = buffer[:end_index].strip()
+            buffer = buffer[end_index:]
+            sentences.append(sentence)
+
+        return sentences, buffer
 
     def generate_stream(self, prompt: str, system_override: str | None = None):
 
-        system_prompt = (
-            system_override
-            if system_override
-            else _FALLBACK_SYSTEM_PROMPT
-        )
+        system_prompt = system_override if system_override else _FALLBACK_SYSTEM_PROMPT
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -75,10 +89,7 @@ class LLMEngine:
 
         try:
             stream = ollama.chat(
-                model=self.model_target,
-                messages=messages,
-                stream=True,
-                keep_alive=-1
+                model=self.model_target, messages=messages, stream=True, keep_alive=-1
             )
 
             for chunk in stream:
@@ -87,42 +98,20 @@ class LLMEngine:
                     continue
 
                 if not first_chunk_logged:
-                    ttft = time.perf_counter() - request_start
-
-                    logger.info(
-                        f"First token at "
-                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} "
-                        f"(TTFT: {ttft:.3f}s)"
-                    )
-
+                    self._log_ttft(request_start)
                     first_chunk_logged = True
 
                 buffer += token
 
-                while True:
-                    if len(buffer) < _MIN_CHUNK_LENGTH:
-                        break
-
-                    match = _SENTENCE_ENDINGS.search(
-                        buffer,
-                        _MIN_CHUNK_LENGTH
-                    )
-
-                    if not match:
-                        break
-
-                    end_index = match.end()
-                    sentence = buffer[:end_index].strip()
-                    buffer = buffer[end_index:]
-
+                sentences, buffer = self._extract_sentences(buffer)
+                for sentence in sentences:
                     logger.info(f"Sentence chunk ready: '{sentence}'")
-
                     yield sentence
 
             if buffer.strip() and len(buffer.strip()) >= _MIN_CHUNK_LENGTH:
                 logger.info(f"Remaining chunk: '{buffer.strip()}'")
                 yield buffer.strip()
 
-        except Exception as e:
+        except (ollama.ResponseError, httpx.RequestError) as e:
             logger.error(f"Streaming inference failure: {e}", exc_info=True)
             yield "I encountered an error processing your request."
