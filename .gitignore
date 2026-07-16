@@ -84,3 +84,5 @@ Thumbs.db
 services/inference-py/models
 
 test_data
+
+temp
