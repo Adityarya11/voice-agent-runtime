@@ -129,37 +129,141 @@ goroutine.
 
 ### 1. AetherRTC Integration
 
-**Priority:** High. Can proceed in parallel with or immediately after
-the VAD override test above. Not blocked by the monitor goroutine —
-barge-in specifically depends on it, basic bidirectional audio routing
-does not.
+**Priority:** High, in progress. Architecture finalized and recorded in
+[`docs/three-tier-architecture.md`](three-tier-architecture.md) — read
+that document first for the full topology, contract definitions, and
+lifecycle walkthrough. This entry tracks execution against it.
 
-AetherRTC acts as the WebRTC edge gateway — terminates browser
-connections, forces G.711/PCMU at the edge to avoid Opus CGO overhead,
-and forwards raw PCM bytes into the Go orchestrator via an internal gRPC
-bridge using the shared `agent.proto` contract.
+**Topology (confirmed):**
 
-AetherRTC state machine stays transport-only: `CONNECTING / STREAMING /
-DISCONNECTED`. The Go orchestrator remains the sole state authority.
-Split-brain is avoided by design — AetherRTC has no knowledge of
-`PROCESSING`, `RESPONDING`, or any AI-layer state.
+```
+Browser <--WebRTC--> AetherRTC <--gRPC--> Orchestrator-Go <--gRPC--> Inference-Python
+                      (gateway.proto)                (agent.proto)
+```
 
-With VAD in place, the Python servicer no longer needs Go to send an
-explicit utterance boundary — it can derive boundaries from AetherRTC's
-continuous live audio stream directly. Open item before wiring this up:
-`SOURCE_SAMPLE_RATE` in `main.py` is currently a hardcoded 44100 constant
-matching the test harness's WAV files. AetherRTC forwards 8kHz G.711
-audio, so this needs to become either a per-session parameter negotiated
-at `START_SESSION`, or AetherRTC resamples before the gRPC bridge.
+Orchestrator-Go is a gRPC _server_ to AetherRTC and a gRPC _client_ to
+Python, simultaneously. Python is unmodified by this integration in every
+respect except one additive proto field — it has no awareness that a
+second hop exists upstream of Go.
 
-Project has been migrated from GitHub to GitLab; README's companion
-project link needs updating once the new location is finalized.
+**Repository and shipping model (confirmed):** AetherRTC and
+`voice-agent-runtime` remain two independent Go-module / repo pairs.
+Neither imports the other's code. The only shared artifact is the
+`gateway.proto` contract, copied and independently code-generated in
+each repo — manual sync accepted as the correctly-sized tradeoff at
+current scale; revisit only if a third consumer of the contract
+emerges. `voice-agent-runtime` has zero build-time or run-time
+dependency on AetherRTC existing; AetherRTC depends only on something
+implementing the `Gateway` server contract, not on VAR specifically.
+
+#### Milestone 1 — Proto contracts
+
+- [ ] Finalize `gateway.proto` with `oneof GatewayEvent { AudioChunk
+    audio; GatewayControl control; }`, mirroring `agent.proto`'s
+      existing `oneof Event` pattern.
+- [ ] Add `int32 source_sample_rate = 3` to `agent.proto`'s existing
+      `ControlSignal` message — purely additive, non-breaking.
+- [ ] Regenerate `agent.proto` bindings in VAR only (Go under
+      `services/orchestrator-go/generated/`, Python under
+      `services/inference-py/grpc_server/`).
+- [ ] Copy `gateway.proto` into AetherRTC's `proto/`, generate Go
+      bindings in AetherRTC only.
+
+Exit criteria: both repos compile with the new fields present; no
+behavioral change yet.
+
+#### Milestone 2 — Orchestrator-Go: Gateway server skeleton
+
+- [ ] New package (e.g. `internal/gateway/server.go`) implementing the
+      `Gateway` service, listening on `:50052`.
+- [ ] On new `StreamAudio` call: read first `GatewayEvent`, expect
+      `GatewayControl{START_SESSION, source_sample_rate}`.
+- [ ] Create `Session` via existing `NewSession`, `Attach` to a fresh
+      `agent.proto` stream to Python, translate into
+      `ControlSignal{START_SESSION, source_sample_rate, profile:
+    <local config>}`.
+
+Exit criteria: a throwaway Go test client dials `:50052`, sends
+`START_SESSION`, and Orchestrator-Go correctly opens a matching session
+to Python — verified in logs.
+
+#### Milestone 3 — Orchestrator-Go: bidirectional bridge
+
+- [ ] Inbound relay: `GatewayEvent{AudioChunk}` from AetherRTC's stream
+      forwarded as `agent.proto` `Event{AudioChunk}` to Python —
+      replaces `main.go`'s current file-based `StreamAudio`/
+      `StreamUtterance` calls as the audio _source_.
+- [ ] Outbound relay: new goroutine draining the existing
+      `AgentAudioChan` (already correctly populated by `readPump`, no
+      changes needed there), writing `GatewayEvent{AudioChunk}` back to
+      AetherRTC — replaces the current `.raw` file write in the test
+      harness.
+- [ ] `END_SESSION` handling and teardown parity with existing
+      `Terminate()`.
+
+Exit criteria: test client from Milestone 2, now streaming real WAV
+bytes instead of just the handshake, produces a correct STT/LLM/TTS
+cycle in Python's logs, with response audio flowing back through Go and
+written to a file by the test client — full round trip through Go
+proven, no browser yet.
+
+#### Milestone 4 — AetherRTC: bridge client
+
+- [ ] `internal/bridge/client.go` — dials Orchestrator-Go at `:50052`,
+      opens `StreamAudio`, sends `START_SESSION` with
+      `source_sample_rate: 8000`.
+- [ ] `internal/bridge/stream_manager.go` — drains `PCMInboundChan`,
+      wraps chunks as `GatewayEvent{AudioChunk}`, sends. Receives the
+      reverse stream, pushes decoded bytes onto a new
+      `PCMOutboundChan`.
+- [ ] Wire into `signaling/server.go` — on `PeerSession` creation
+      (`"offer"` case), start its bridge goroutine.
+
+Exit criteria: with Milestone 3 proven, a real browser tab speaking into
+AetherRTC produces the same correct STT/LLM/TTS cycle in Python's logs —
+inbound path fully proven end to end, live.
+
+#### Milestone 5 — AetherRTC: outbound audio path
+
+Two real gaps in the current codebase surfaced during architecture
+review, both blocking this milestone regardless of the gRPC bridge
+work:
+
+- [ ] `pkg/codec/g117.go` has `DecodeUlaw` only — `EncodeUlaw` (PCM ->
+      G.711) does not exist yet.
+- [ ] `session.go`'s `NewPeerSession` never calls `AddTrack` on the
+      `PeerConnection` — no outbound audio track is configured.
+      `OnTrack` only wires the inbound direction today.
+
+Work:
+
+- [ ] Implement `EncodeUlaw`.
+- [ ] Add an outbound `TrackLocalStaticSample` at session creation.
+- [ ] Writer goroutine draining `PCMOutboundChan` -> encode -> write.
+
+Exit criteria: response audio is audible in the browser tab; full loop
+closed.
+
+#### Milestone 6 — End-to-end verification and cleanup
+
+- [ ] Full lifecycle test: connect, speak two utterances, disconnect —
+      verify `Session.Terminate()` and `PeerSession.Close()` both fire
+      cleanly with no goroutine leaks on either side.
+- [ ] Confirm a single `session_id` is identical across AetherRTC,
+      Orchestrator-Go, and Python logs for one call.
+
+**Explicitly out of scope for this integration** (named and deferred,
+not forgotten): multi-tenancy, auth/API keys, billing for AetherRTC as
+a hosted product; TURN server configuration for public-internet NAT
+traversal (STUN-only is acceptable for local/same-network testing
+only); horizontal scaling of either service; barge-in (depends on the
+monitor goroutine below); concurrent ordered utterance processing.
 
 ### 2. Monitor Goroutine (Go)
 
-**Priority:** Medium. Deferred until a single-user end-to-end path
-(VAD alone + AetherRTC basic routing) is fully verified. Only barge-in
-requires this — nothing in basic AetherRTC audio routing does.
+**Priority:** Medium. Deferred until the AetherRTC integration above
+reaches Milestone 6. Only barge-in requires this — nothing in basic
+AetherRTC audio routing does.
 
 A third goroutine inside `Session.Run()` watching for:
 
@@ -195,9 +299,11 @@ serialization.
 Tool calling, third-party integrations (Gmail, database-backed user
 state), and broader agent extensibility are intentionally deferred to a
 dedicated design discussion once Phase 1 (single-user, VAD-driven,
-AetherRTC-connected voice pipeline) is complete and stable. Noted here
-so the intent isn't lost, not to be expanded until that discussion
-happens.
+AetherRTC-connected voice pipeline) is complete and stable. This phase
+touches only `inference-python` — it has no bearing on AetherRTC or the
+gateway contract, since tools/RAG are a reasoning-layer concern living
+entirely behind Python's existing boundary with Go. Noted here so the
+intent isn't lost, not to be expanded until that discussion happens.
 
 ---
 
@@ -209,3 +315,6 @@ happens.
   design, milestone breakdown, and architectural decisions
 - [`docs/vad.md`](vad.md) — VAD integration design, milestone breakdown,
   and architectural decisions
+- [`docs/three-tier-architecture.md`](three-tier-architecture.md) —
+  AetherRTC / Orchestrator-Go / Inference-Python topology, proto
+  contracts, and full session lifecycle walkthrough
