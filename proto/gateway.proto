@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "services/orchestrator-go/generated/gateway;gateway";
+
+service Gateway {
+  // bidirectional stream
+  rpc StreamAudio(stream GatewayEvent) returns (stream GatewayEvent);
+}
+
+message GatewayEvent {
+  string session_id = 1;
+
+  oneof payload {
+    AudioChunk audio = 2;
+    GatewayControl control = 3;
+  }
+}
+
+message AudioChunk {
+  bytes data = 1;
+}
+
+message GatewayControl {
+  enum SignalType {
+    START_SESSION = 0;
+    END_SESSION = 1;
+  }
+
+  SignalType type = 1;
+  int32 source_sample_rate = 2;
+}

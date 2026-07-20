@@ -276,11 +276,12 @@ func (x *Transcript) GetIsFinal() bool {
 }
 
 type ControlSignal struct {
-	state         protoimpl.MessageState   `protogen:"open.v1"`
-	Type          ControlSignal_SignalType `protobuf:"varint,1,opt,name=type,proto3,enum=agent.ControlSignal_SignalType" json:"type,omitempty"`
-	Profile       *AgentProfile            `protobuf:"bytes,2,opt,name=profile,proto3" json:"profile,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState   `protogen:"open.v1"`
+	Type             ControlSignal_SignalType `protobuf:"varint,1,opt,name=type,proto3,enum=agent.ControlSignal_SignalType" json:"type,omitempty"`
+	Profile          *AgentProfile            `protobuf:"bytes,2,opt,name=profile,proto3" json:"profile,omitempty"`
+	SourceSampleRate int32                    `protobuf:"varint,3,opt,name=source_sample_rate,json=sourceSampleRate,proto3" json:"source_sample_rate,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ControlSignal) Reset() {
@@ -325,6 +326,13 @@ func (x *ControlSignal) GetProfile() *AgentProfile {
 		return x.Profile
 	}
 	return nil
+}
+
+func (x *ControlSignal) GetSourceSampleRate() int32 {
+	if x != nil {
+		return x.SourceSampleRate
+	}
+	return 0
 }
 
 type AgentProfile struct {
@@ -399,10 +407,11 @@ const file_agent_proto_rawDesc = "" +
 	"\n" +
 	"Transcript\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x19\n" +
-	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\xc9\x01\n" +
+	"\bis_final\x18\x02 \x01(\bR\aisFinal\"\xf7\x01\n" +
 	"\rControlSignal\x123\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x1f.agent.ControlSignal.SignalTypeR\x04type\x12-\n" +
-	"\aprofile\x18\x02 \x01(\v2\x13.agent.AgentProfileR\aprofile\"T\n" +
+	"\aprofile\x18\x02 \x01(\v2\x13.agent.AgentProfileR\aprofile\x12,\n" +
+	"\x12source_sample_rate\x18\x03 \x01(\x05R\x10sourceSampleRate\"T\n" +
 	"\n" +
 	"SignalType\x12\x11\n" +
 	"\rSTART_SESSION\x10\x00\x12\x0f\n" +

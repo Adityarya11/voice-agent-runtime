@@ -1,47 +1,47 @@
 syntax = "proto3";
 
-package agent; 
+package agent;
 
 option go_package = "services/orchestrator-go/generated;agent";
 
 service VoiceAgent {
-    // bidirectional stream 
-    rpc StreamEvents(stream Event) returns (stream Event);
+  // bidirectional stream
+  rpc StreamEvents(stream Event) returns (stream Event);
 }
 
 message Event {
-    string session_id = 1;
+  string session_id = 1;
 
-    oneof payload {
-        AudioChunk audio = 2;
-        Transcript transcript = 3; 
-        ControlSignal control = 4;
-    }
+  oneof payload {
+    AudioChunk audio = 2;
+    Transcript transcript = 3;
+    ControlSignal control = 4;
+  }
 }
 
 message AudioChunk {
-    bytes data = 1;
+  bytes data = 1;
 }
 
 message Transcript {
-    string text = 1;
-    bool is_final = 2;
+  string text = 1;
+  bool is_final = 2;
 }
 
 message ControlSignal {
-    enum SignalType {
-        START_SESSION = 0; 
-        END_SESSION = 1; 
-        BARGE_IN = 2;   // user interrupts
-        END_OF_UTTERANCE = 3; // a pause in the audio-input
-    }
+  enum SignalType {
+    START_SESSION = 0;
+    END_SESSION = 1;
+    BARGE_IN = 2; // user interrupts
+    END_OF_UTTERANCE = 3; // a pause in the audio-input
+  }
 
-    SignalType type = 1;
-
-    AgentProfile profile = 2;
+  SignalType type = 1;
+  AgentProfile profile = 2;
+  int32 source_sample_rate = 3;
 }
 
 message AgentProfile {
-    string agent_name = 1; 
-    string system_prompt = 2;
+  string agent_name = 1;
+  string system_prompt = 2;
 }
