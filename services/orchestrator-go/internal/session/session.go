@@ -180,6 +180,10 @@ func (s *Session) StreamSilence(durationMs int) error {
 	return nil
 }
 
+func (s *Session) SendAudio(data []byte) error {
+	return s.sendAudioChunk(data)
+}
+
 func (s *Session) Run() {
 	s.readPump()
 }
