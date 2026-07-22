@@ -29,8 +29,12 @@ func main() {
 		log.Fatalf("Failed to listen on %s: %v", *port, err)
 	}
 
+	gwServer, err := gateway.NewServer(profile, *inferenceAddr)
+	if err != nil {
+		log.Fatalf("Failed to initialize gateway server: %v", err)
+	}
 	grpcServer := grpc.NewServer()
-	gatewaypb.RegisterGatewayServer(grpcServer, gateway.NewServer(profile, *inferenceAddr))
+	gatewaypb.RegisterGatewayServer(grpcServer, gwServer)
 
 	log.Printf("Gateway server listening on %s (profile: %s, inference: %s)", *port, profile.Name, *inferenceAddr)
 	if err := grpcServer.Serve(lis); err != nil {
