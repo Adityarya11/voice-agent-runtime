@@ -158,15 +158,15 @@ implementing the `Gateway` server contract, not on VAR specifically.
 
 #### Milestone 1 — Proto contracts
 
-- [ ] Finalize `gateway.proto` with `oneof GatewayEvent { AudioChunk
-    audio; GatewayControl control; }`, mirroring `agent.proto`'s
+- [x] Finalize `gateway.proto` with `oneof GatewayEvent { AudioChunk
+  audio; GatewayControl control; }`, mirroring `agent.proto`'s
       existing `oneof Event` pattern.
-- [ ] Add `int32 source_sample_rate = 3` to `agent.proto`'s existing
+- [x] Add `int32 source_sample_rate = 3` to `agent.proto`'s existing
       `ControlSignal` message — purely additive, non-breaking.
-- [ ] Regenerate `agent.proto` bindings in VAR only (Go under
+- [x] Regenerate `agent.proto` bindings in VAR only (Go under
       `services/orchestrator-go/generated/`, Python under
       `services/inference-py/grpc_server/`).
-- [ ] Copy `gateway.proto` into AetherRTC's `proto/`, generate Go
+- [x] Copy `gateway.proto` into AetherRTC's `proto/`, generate Go
       bindings in AetherRTC only.
 
 Exit criteria: both repos compile with the new fields present; no
@@ -174,14 +174,14 @@ behavioral change yet.
 
 #### Milestone 2 — Orchestrator-Go: Gateway server skeleton
 
-- [ ] New package (e.g. `internal/gateway/server.go`) implementing the
+- [x] New package (e.g. `internal/gateway/server.go`) implementing the
       `Gateway` service, listening on `:50052`.
-- [ ] On new `StreamAudio` call: read first `GatewayEvent`, expect
+- [x] On new `StreamAudio` call: read first `GatewayEvent`, expect
       `GatewayControl{START_SESSION, source_sample_rate}`.
-- [ ] Create `Session` via existing `NewSession`, `Attach` to a fresh
+- [x] Create `Session` via existing `NewSession`, `Attach` to a fresh
       `agent.proto` stream to Python, translate into
       `ControlSignal{START_SESSION, source_sample_rate, profile:
-    <local config>}`.
+  <local config>}`.
 
 Exit criteria: a throwaway Go test client dials `:50052`, sends
 `START_SESSION`, and Orchestrator-Go correctly opens a matching session
@@ -189,16 +189,16 @@ to Python — verified in logs.
 
 #### Milestone 3 — Orchestrator-Go: bidirectional bridge
 
-- [ ] Inbound relay: `GatewayEvent{AudioChunk}` from AetherRTC's stream
+- [x] Inbound relay: `GatewayEvent{AudioChunk}` from AetherRTC's stream
       forwarded as `agent.proto` `Event{AudioChunk}` to Python —
       replaces `main.go`'s current file-based `StreamAudio`/
       `StreamUtterance` calls as the audio _source_.
-- [ ] Outbound relay: new goroutine draining the existing
+- [x] Outbound relay: new goroutine draining the existing
       `AgentAudioChan` (already correctly populated by `readPump`, no
       changes needed there), writing `GatewayEvent{AudioChunk}` back to
       AetherRTC — replaces the current `.raw` file write in the test
       harness.
-- [ ] `END_SESSION` handling and teardown parity with existing
+- [x] `END_SESSION` handling and teardown parity with existing
       `Terminate()`.
 
 Exit criteria: test client from Milestone 2, now streaming real WAV
