@@ -68,6 +68,63 @@ machine design, is documented in:
 The orchestrator never touches AI models. The inference engine never
 manages call lifecycle. Each is replaceable independently of the other.
 
+### Life-Cycle 
+```mermaid
+flowchart TB
+    subgraph Browser["Browser — index.html test harness"]
+        Mic["getUserMedia mic"]
+        PC["RTCPeerConnection"]
+    end
+
+    subgraph AetherRTC["AetherRTC :8080"]
+        Sig["signaling/server.go"]
+        Peer["webrtc/session.go — PeerSession"]
+        PCMIn["PCMInboundChan"]
+        Client["bridge/client.go"]
+        StreamMgr["bridge/stream_manager.go"]
+        PCMOut["PCMOutboundChan"]
+        EncodeStub["EncodeUlaw — NOT BUILT"]
+        OutTrack["Outbound RTP track — NOT WIRED"]
+    end
+
+    subgraph OrchGo["Orchestrator-Go :50052"]
+        GwServer["gateway/server.go"]
+        Sess["session.go — Session state machine"]
+    end
+
+    subgraph Python["Inference-Python :50051"]
+        VAD["Silero VAD"]
+        STT["Faster-Whisper"]
+        LLM["Qwen2.5:3b"]
+        TTS["Piper"]
+    end
+
+    Mic --> PC
+    PC == "WebRTC / G.711" ==> Sig
+    Sig --> Peer
+    Peer -- "OnTrack decode" --> PCMIn
+    PCMIn --> Client
+    Client --> StreamMgr
+    StreamMgr == "gateway.proto StreamAudio" ==> GwServer
+    GwServer --> Sess
+    Sess == "agent.proto StreamEvents" ==> VAD
+    VAD --> STT --> LLM --> TTS
+
+    TTS -. "agent.proto response" .-> Sess
+    Sess -. "gateway.proto response" .-> StreamMgr
+    StreamMgr -. "writes" .-> PCMOut
+    PCMOut -.-> EncodeStub
+    EncodeStub -.-> OutTrack
+    OutTrack -. "playback — NOT BUILT" .-> PC
+
+    classDef built fill:#1a3a1a,stroke:#4caf50,color:#fff
+    classDef pending fill:#3a2a1a,stroke:#c97d3a,stroke-dasharray: 4 4,color:#fff
+
+    class Mic,PC,Sig,Peer,PCMIn,Client,StreamMgr,GwServer,Sess,VAD,STT,LLM,TTS built
+    class PCMOut,EncodeStub,OutTrack pending
+```
+
+
 ---
 
 ## Companion Project: AetherRTC (Edge Media Gateway)
