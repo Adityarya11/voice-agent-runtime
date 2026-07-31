@@ -4,6 +4,7 @@ import queue
 import signal
 import sys
 import threading
+from collections.abc import Generator
 from concurrent import futures
 from dataclasses import dataclass, field
 
@@ -32,8 +33,9 @@ logger = logging.getLogger("InferenceEngine")
 
 CHUNK_SIZE = 4096
 _SHUTDOWN = object()
+_UTTERANCE_STOP = object()
 VAD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "silero_vad.onnx")
-SOURCE_SAMPLE_RATE = 44100
+DEFAULT_SOURCE_SAMPLE_RATE = 44100
 
 
 @dataclass
@@ -41,8 +43,10 @@ class SessionContext:
     session_id: str
     outbound_queue: queue.Queue
     grpc_context: grpc.ServicerContext
+    utterance_queue: queue.Queue = field(default_factory=queue.Queue)
     utterance_done_event: threading.Event = field(default_factory=threading.Event)
     system_prompt: str | None = None
+    conversation_history: list[dict[str, str]] = field(default_factory=list)
 
 
 class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
@@ -58,12 +62,20 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
             user_text = self.transcriber.transcribe(utterance_bytes)
 
             if not user_text:
-                logger.warning(f"[{ctx.session_id}] Empty transcription, skipping inference.")
+                logger.warning(
+                    f"[{ctx.session_id}] Empty transcription, skipping inference."
+                )
                 return
 
             logger.info(f"[{ctx.session_id}] STT: '{user_text}'")
 
-            for sentence in self.llm.generate_stream(user_text, system_override=ctx.system_prompt):
+            assistant_parts: list[str] = []
+            for sentence in self.llm.generate_stream(
+                user_text,
+                system_override=ctx.system_prompt,
+                history=ctx.conversation_history,
+            ):
+                assistant_parts.append(sentence)
                 if not ctx.grpc_context.is_active():
                     logger.warning(
                         f"[{ctx.session_id}] gRPC context cancelled mid-utterance. "
@@ -73,77 +85,103 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
 
                 wav_bytes = self.tts.synthesize(sentence)
                 if not wav_bytes:
-                    logger.warning(f"[{ctx.session_id}] TTS returned empty bytes for: '{sentence}'")
+                    logger.warning(
+                        f"[{ctx.session_id}] TTS returned empty bytes for: '{sentence}'"
+                    )
                     continue
 
                 for i in range(0, len(wav_bytes), CHUNK_SIZE):
-                    chunk = wav_bytes[i: i + CHUNK_SIZE]
-                    ctx.outbound_queue.put(agent_pb2.Event(
-                        session_id=ctx.session_id,
-                        audio=agent_pb2.AudioChunk(data=chunk),
-                    ))
+                    chunk = wav_bytes[i : i + CHUNK_SIZE]
+                    ctx.outbound_queue.put(
+                        agent_pb2.Event(
+                            session_id=ctx.session_id,
+                            audio=agent_pb2.AudioChunk(data=chunk),
+                        )
+                    )
+
+            if assistant_parts:
+                ctx.conversation_history.extend(
+                    [
+                        {"role": "user", "content": user_text},
+                        {"role": "assistant", "content": " ".join(assistant_parts)},
+                    ]
+                )
+                ctx.conversation_history = ctx.conversation_history[-12:]
 
             logger.info(f"[{ctx.session_id}] Utterance response complete.")
 
         except grpc.RpcError as e:
-            logger.error(f"[{ctx.session_id}] gRPC error during utterance: {e}", exc_info=True)
+            logger.error(
+                f"[{ctx.session_id}] gRPC error during utterance: {e}", exc_info=True
+            )
         except RuntimeError as e:
-            logger.error(f"[{ctx.session_id}] Inference runtime failure: {e}", exc_info=True)
+            logger.error(
+                f"[{ctx.session_id}] Inference runtime failure: {e}", exc_info=True
+            )
         finally:
             ctx.utterance_done_event.set()
 
     def _dispatch_utterance(self, ctx: SessionContext, vad: VADDetector) -> None:
         frames = vad.get_utterance_frames()
         if len(frames) == 0:
-            logger.warning(f"[{ctx.session_id}] Boundary fired with empty VAD buffer, ignoring.")
+            logger.warning(
+                f"[{ctx.session_id}] Boundary fired with empty VAD buffer, ignoring."
+            )
             return
 
         utterance_bytes = frames_to_wav(frames, AudioPreprocessor.TARGET_SR)
-        ctx.utterance_done_event.clear()
 
         logger.info(
             f"[{ctx.session_id}] Utterance boundary "
             f"({len(frames)} samples, {len(frames) / AudioPreprocessor.TARGET_SR:.2f}s). "
-            f"Dispatching inference."
+            f"Queuing inference."
         )
 
-        threading.Thread(
-            target=self._run_utterance,
-            args=(ctx, utterance_bytes),
-            daemon=True,
-        ).start()
+        ctx.utterance_queue.put(utterance_bytes)
 
-    def _handle_control_event(self, ctx: SessionContext, vad: VADDetector, control: agent_pb2.ControlSignal) -> None:
+    def _utterance_worker(self, ctx: SessionContext) -> None:
+        while True:
+            utterance_bytes = ctx.utterance_queue.get()
+            if utterance_bytes is _UTTERANCE_STOP:
+                ctx.outbound_queue.put(_SHUTDOWN)
+                return
+
+            self._run_utterance(ctx, utterance_bytes)
+
+    def _handle_control_event(
+        self, ctx: SessionContext, vad: VADDetector, control: agent_pb2.ControlSignal
+    ) -> None:
         if control.profile.system_prompt:
             ctx.system_prompt = control.profile.system_prompt
-            logger.info(f"[{ctx.session_id}] Profile received — agent: '{control.profile.agent_name}'")
+            logger.info(
+                f"[{ctx.session_id}] Profile received — agent: '{control.profile.agent_name}'"
+            )
 
         if control.type != agent_pb2.ControlSignal.END_OF_UTTERANCE:
             return
 
-        if not ctx.utterance_done_event.is_set():
-            ctx.utterance_done_event.wait()
-
         self._dispatch_utterance(ctx, vad)
 
-    def _handle_audio_event(self, ctx: SessionContext, vad: VADDetector, preprocessor: AudioPreprocessor, audio: agent_pb2.AudioChunk) -> None:
+    def _handle_audio_event(
+        self,
+        ctx: SessionContext,
+        vad: VADDetector,
+        preprocessor: AudioPreprocessor,
+        audio: agent_pb2.AudioChunk,
+    ) -> None:
         for frame in preprocessor.push(audio.data):
             command = vad.process_frames(frame)
 
             if command == VADCommand.START_SPEECH:
                 logger.info(f"[{ctx.session_id}] VAD: speech started.")
-                return
+                continue
 
             if command == VADCommand.END_OF_UTTERANCE:
-                if not ctx.utterance_done_event.is_set():
-                    logger.warning(f"[{ctx.session_id}] VAD boundary while utterance in progress. Waiting.")
-                    ctx.utterance_done_event.wait()
-
                 self._dispatch_utterance(ctx, vad)
 
     def _read_pump(self, request_iterator, ctx: SessionContext) -> None:
-        vad = VADDetector(VAD_MODEL_PATH)
-        preprocessor = AudioPreprocessor(source_sr=SOURCE_SAMPLE_RATE)
+        vad = VADDetector(VAD_MODEL_PATH, min_silence_duration=800)
+        preprocessor: AudioPreprocessor | None = None
         ctx.utterance_done_event.set()
 
         try:
@@ -151,17 +189,42 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 ctx.session_id = event.session_id
 
                 if event.HasField("control"):
-                    self._handle_control_event(ctx, vad, event.control)
+                    control = event.control
+                    if (
+                        control.type == agent_pb2.ControlSignal.START_SESSION
+                        and preprocessor is None
+                    ):
+                        source_rate = (
+                            control.source_sample_rate or DEFAULT_SOURCE_SAMPLE_RATE
+                        )
+                        preprocessor = AudioPreprocessor(source_sr=source_rate)
+                        logger.info(
+                            f"[{ctx.session_id}] Preprocessor initialized at source_sample_rate={source_rate}"
+                        )
+                    self._handle_control_event(ctx, vad, control)
                 elif event.HasField("audio"):
+                    if preprocessor is None:
+                        logger.warning(
+                            f"[{ctx.session_id}] Audio received before START_SESSION; defaulting sample rate."
+                        )
+                        preprocessor = AudioPreprocessor(
+                            source_sr=DEFAULT_SOURCE_SAMPLE_RATE
+                        )
                     self._handle_audio_event(ctx, vad, preprocessor, event.audio)
 
         except grpc.RpcError as e:
-            logger.error(f"[{ctx.session_id}] gRPC stream error in read pump: {e}", exc_info=True)
+            logger.error(
+                f"[{ctx.session_id}] gRPC stream error in read pump: {e}", exc_info=True
+            )
         finally:
-            logger.info(f"[{ctx.session_id}] Inbound stream closed. Signaling shutdown.")
-            ctx.outbound_queue.put(_SHUTDOWN)
+            logger.info(
+                f"[{ctx.session_id}] Inbound stream closed. Signaling shutdown."
+            )
+            ctx.utterance_queue.put(_UTTERANCE_STOP)
 
-    def StreamEvents(self, request_iterator, context) -> None:
+    def StreamEvents(
+        self, request_iterator, context
+    ) -> Generator[agent_pb2.Event, None, None]:
         logger.info("Incoming gRPC stream connected.")
 
         ctx = SessionContext(
@@ -169,6 +232,13 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
             outbound_queue=queue.Queue(),
             grpc_context=context,
         )
+
+        worker_thread = threading.Thread(
+            target=self._utterance_worker,
+            args=(ctx,),
+            daemon=True,
+        )
+        worker_thread.start()
 
         pump_thread = threading.Thread(
             target=self._read_pump,

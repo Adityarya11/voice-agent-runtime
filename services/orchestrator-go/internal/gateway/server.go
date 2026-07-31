@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -53,7 +54,10 @@ func (s *Server) StreamAudio(stream gatewaypb.Gateway_StreamAudioServer) error {
 	log.Printf("[Gateway] Incoming session %s, source_sample_rate=%d", sessionID, sourceSampleRate)
 
 	agentClient := agentpb.NewVoiceAgentClient(s.conn)
-	agentStream, err := agentClient.StreamEvents(stream.Context())
+	agentCtx, cancelAgent := context.WithCancel(stream.Context())
+	defer cancelAgent()
+
+	agentStream, err := agentClient.StreamEvents(agentCtx)
 	if err != nil {
 		return fmt.Errorf("gateway: failed to open agent stream: %v", err)
 	}
@@ -138,6 +142,8 @@ func (s *Server) StreamAudio(stream gatewaypb.Gateway_StreamAudioServer) error {
 			log.Printf("[Gateway] session %s: AetherRTC recv error: %v", sessionID, err)
 		}
 	}
+
+	cancelAgent()
 	<-outboundDone
 	return nil
 

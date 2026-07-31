@@ -32,13 +32,13 @@ class LLMEngine:
                 f"Ensure 'ollama pull {self.model_target}' has been run."
             )
 
-    def generate(self, prompt: str, system_override: str | None = None) -> str:
+    def generate(self, prompt: str, system_override: str | None = None, history: list[dict[str, str]] | None = None) -> str:
         system_prompt = system_override if system_override else _FALLBACK_SYSTEM_PROMPT
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
 
         try:
             response = ollama.chat(model=self.model_target, messages=messages)
@@ -73,14 +73,14 @@ class LLMEngine:
 
         return sentences, buffer
 
-    def generate_stream(self, prompt: str, system_override: str | None = None):
+    def generate_stream(self, prompt: str, system_override: str | None = None, history: list[dict[str, str]] | None = None):
 
         system_prompt = system_override if system_override else _FALLBACK_SYSTEM_PROMPT
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
 
         buffer = ""
 

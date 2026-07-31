@@ -188,13 +188,13 @@ func (s *Session) Run() {
 	s.readPump()
 }
 
-func (s *Session) handleAudioEvent(audio *pb.AudioChunk, firstChunk *bool) {
-	if *firstChunk {
+func (s *Session) handleAudioEvent(audio *pb.AudioChunk, responseIdle *time.Timer) {
+	if s.GetState() != StateResponding {
 		if err := s.transitionTo(StateResponding); err != nil {
 			log.Printf("[Session %s] readPump transition error: %v", s.ID, err)
 		}
-		*firstChunk = false
 	}
+	responseIdle.Reset(750 * time.Millisecond)
 	s.AgentAudioChan <- audio.Data
 }
 
@@ -202,7 +202,15 @@ func (s *Session) readPump() {
 	defer close(s.AgentAudioChan)
 	defer s.signalDone()
 
-	firstChunk := true
+	responseIdle := time.AfterFunc(750*time.Millisecond, func() {
+		if s.GetState() == StateResponding {
+			if err := s.transitionTo(StateActive); err != nil {
+				log.Printf("[Session %s] response idle transition error: %v", s.ID, err)
+			}
+		}
+	})
+	responseIdle.Stop()
+	defer responseIdle.Stop()
 
 	for {
 		event, err := s.stream.Recv()
@@ -219,7 +227,7 @@ func (s *Session) readPump() {
 		}
 
 		if audio := event.GetAudio(); audio != nil {
-			s.handleAudioEvent(audio, &firstChunk)
+			s.handleAudioEvent(audio, responseIdle)
 		}
 	}
 }
