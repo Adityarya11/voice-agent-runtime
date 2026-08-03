@@ -153,18 +153,18 @@ Verified against three isolated test scripts:
 
 ---
 
-## Known limitation carried forward
+## Current runtime behavior
 
-`_read_pump` processes one gRPC event at a time. When an utterance is
-dispatched, `utterance_done_event.wait()` blocks the entire read loop
-until inference completes -- including consumption of any new audio
-arriving mid-inference. VAD is not actively evaluating incoming audio
-during this window; anything spoken while a previous utterance is being
-processed queues at the transport layer and is only evaluated once the
-prior inference releases the lock. This is the same sequential-gating
-tradeoff accepted in true-duplex milestone 3, carried forward
-deliberately rather than solved here. It becomes the concrete motivation
-for the next milestone.
+`_read_pump` now stays hot and keeps consuming gRPC audio while
+completed utterances are queued onto a separate worker. That preserves
+ordering without blocking live audio intake behind STT/LLM/TTS latency,
+which is what caused upstream backpressure and silent packet loss in the
+original implementation.
+
+The utterance worker still processes one completed utterance at a time,
+so response order remains deterministic. True barge-in handling is still
+the next milestone, but it is no longer coupled to the audio ingest loop
+itself.
 
 ---
 
