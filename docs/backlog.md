@@ -159,7 +159,7 @@ implementing the `Gateway` server contract, not on VAR specifically.
 #### Milestone 1 — Proto contracts
 
 - [x] Finalize `gateway.proto` with `oneof GatewayEvent { AudioChunk
-  audio; GatewayControl control; }`, mirroring `agent.proto`'s
+audio; GatewayControl control; }`, mirroring `agent.proto`'s
       existing `oneof Event` pattern.
 - [x] Add `int32 source_sample_rate = 3` to `agent.proto`'s existing
       `ControlSignal` message — purely additive, non-breaking.
@@ -181,7 +181,7 @@ behavioral change yet.
 - [x] Create `Session` via existing `NewSession`, `Attach` to a fresh
       `agent.proto` stream to Python, translate into
       `ControlSignal{START_SESSION, source_sample_rate, profile:
-  <local config>}`.
+<local config>}`.
 
 Exit criteria: a throwaway Go test client dials `:50052`, sends
 `START_SESSION`, and Orchestrator-Go correctly opens a matching session
@@ -209,14 +209,14 @@ proven, no browser yet.
 
 #### Milestone 4 — AetherRTC: bridge client
 
-- [ ] `internal/bridge/client.go` — dials Orchestrator-Go at `:50052`,
+- [x] `internal/bridge/client.go` — dials Orchestrator-Go at `:50052`,
       opens `StreamAudio`, sends `START_SESSION` with
       `source_sample_rate: 8000`.
-- [ ] `internal/bridge/stream_manager.go` — drains `PCMInboundChan`,
+- [x] `internal/bridge/stream_manager.go` — drains `PCMInboundChan`,
       wraps chunks as `GatewayEvent{AudioChunk}`, sends. Receives the
       reverse stream, pushes decoded bytes onto a new
       `PCMOutboundChan`.
-- [ ] Wire into `signaling/server.go` — on `PeerSession` creation
+- [x] Wire into `signaling/server.go` — on `PeerSession` creation
       (`"offer"` case), start its bridge goroutine.
 
 Exit criteria: with Milestone 3 proven, a real browser tab speaking into
@@ -229,17 +229,17 @@ Two real gaps in the current codebase surfaced during architecture
 review, both blocking this milestone regardless of the gRPC bridge
 work:
 
-- [ ] `pkg/codec/g117.go` has `DecodeUlaw` only — `EncodeUlaw` (PCM ->
+- [x] `pkg/codec/g117.go` has `DecodeUlaw` only — `EncodeUlaw` (PCM ->
       G.711) does not exist yet.
-- [ ] `session.go`'s `NewPeerSession` never calls `AddTrack` on the
+- [x] `session.go`'s `NewPeerSession` never calls `AddTrack` on the
       `PeerConnection` — no outbound audio track is configured.
       `OnTrack` only wires the inbound direction today.
 
 Work:
 
-- [ ] Implement `EncodeUlaw`.
-- [ ] Add an outbound `TrackLocalStaticSample` at session creation.
-- [ ] Writer goroutine draining `PCMOutboundChan` -> encode -> write.
+- [x] Implement `EncodeUlaw`.
+- [x] Add an outbound `TrackLocalStaticSample` at session creation.
+- [x] Writer goroutine draining `PCMOutboundChan` -> encode -> write.
 
 Exit criteria: response audio is audible in the browser tab; full loop
 closed.
