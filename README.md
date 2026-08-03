@@ -68,7 +68,8 @@ machine design, is documented in:
 The orchestrator never touches AI models. The inference engine never
 manages call lifecycle. Each is replaceable independently of the other.
 
-### Life-Cycle 
+### Life-Cycle
+
 ```mermaid
 flowchart TB
     subgraph Browser["Browser — index.html test harness"]
@@ -92,7 +93,7 @@ flowchart TB
         Sess["session.go — Session state machine"]
     end
 
-    subgraph Python["Inference-Python :50051"]
+    subgraph Python[" Inference-Python :50051"]
         VAD["Silero VAD"]
         STT["Faster-Whisper"]
         LLM["Qwen2.5:3b"]
@@ -123,7 +124,6 @@ flowchart TB
     class Mic,PC,Sig,Peer,PCMIn,Client,StreamMgr,GwServer,Sess,VAD,STT,LLM,TTS built
     class PCMOut,EncodeStub,OutTrack pending
 ```
-
 
 ---
 
