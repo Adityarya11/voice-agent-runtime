@@ -1,14 +1,18 @@
+import io
 import logging
 import os
 import queue
 import signal
 import sys
 import threading
+import wave
 from collections.abc import Generator
 from concurrent import futures
 from dataclasses import dataclass, field
 
 import grpc
+import numpy as np
+import scipy.signal
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "grpc_server"))
 import agent_pb2
@@ -36,6 +40,34 @@ _SHUTDOWN = object()
 _UTTERANCE_STOP = object()
 VAD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "silero_vad.onnx")
 DEFAULT_SOURCE_SAMPLE_RATE = 44100
+TTS_OUTPUT_SAMPLE_RATE = 8000
+
+
+def wav_to_pcm16_mono(wav_bytes: bytes, target_sr: int = TTS_OUTPUT_SAMPLE_RATE) -> bytes:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav_in:
+        source_sr = wav_in.getframerate()
+        channels = wav_in.getnchannels()
+        sample_width = wav_in.getsampwidth()
+        frames = wav_in.readframes(wav_in.getnframes())
+
+    if sample_width != 2:
+        raise RuntimeError(f"Unsupported TTS sample width: {sample_width}")
+
+    samples = np.frombuffer(frames, dtype=np.int16)
+    if channels > 1:
+        samples = samples.reshape(-1, channels)[:, 0]
+
+    if source_sr != target_sr:
+        gcd = np.gcd(source_sr, target_sr)
+        samples_f32 = samples.astype(np.float32) / 32768.0
+        samples_f32 = scipy.signal.resample_poly(
+            samples_f32,
+            target_sr // gcd,
+            source_sr // gcd,
+        ).astype(np.float32)
+        samples = np.clip(samples_f32 * 32767.0, -32768, 32767).astype(np.int16)
+
+    return samples.tobytes()
 
 
 @dataclass
@@ -90,8 +122,10 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                     )
                     continue
 
-                for i in range(0, len(wav_bytes), CHUNK_SIZE):
-                    chunk = wav_bytes[i : i + CHUNK_SIZE]
+                pcm_bytes = wav_to_pcm16_mono(wav_bytes)
+
+                for i in range(0, len(pcm_bytes), CHUNK_SIZE):
+                    chunk = pcm_bytes[i : i + CHUNK_SIZE]
                     ctx.outbound_queue.put(
                         agent_pb2.Event(
                             session_id=ctx.session_id,
