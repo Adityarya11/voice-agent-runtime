@@ -9,12 +9,12 @@ The same inference pipeline that powers a dental clinic receptionist can
 power a real estate consultant or an admissions counselor. Only the YAML
 profile changes.
 
-> **Status: Active development.** The gRPC bridge, local inference pipeline,
-> dynamic agent profiling, session state management, true bidirectional
-> duplex, and VAD-gated speech boundary detection are all functional and
-> verified. A monitor goroutine for barge-in handling and the AetherRTC
-> WebRTC bridge are in progress. Public MVP and latency benchmarks
-> targeted for **[07/2026]**.
+> **Status: Active development.** The full three-tier pipeline (AetherRTC →
+> Orchestrator-Go → Inference-Python) is functional and verified end-to-end:
+> a real browser microphone, through WebRTC, through the gRPC bridge, through
+> VAD/STT/LLM/TTS, with audible response audio playing back in the browser.
+> Milestone 6 lifecycle verification and the monitor goroutine for barge-in
+> remain as the next milestones.
 
 ---
 
@@ -37,6 +37,8 @@ machine design, is documented in:
   milestone breakdown
 - [`docs/vad.md`](docs/vad.md) — VAD integration design and milestone
   breakdown
+- [`docs/three-tier-architecture.md`](docs/three-tier-architecture.md) —
+  AetherRTC integration design, proto contracts, and full session lifecycle
 
 ---
 
@@ -44,14 +46,26 @@ machine design, is documented in:
 
 ```text
 ┌─────────────────────────────────────┐
-│           GO ORCHESTRATOR           │
+│         AETHERRTC (Edge Gateway)    │
 │                                     │
-│  Session lifecycle, state machine,  │
-│  bidirectional duplex streaming     │
+│  WebRTC termination (Pion)          │
+│  G.711/PCMU codec (encode/decode)   │
+│  gRPC bridge to orchestrator        │
 │                                     │
 └──────────────┬──────────────────────┘
                │ gRPC bidirectional stream
-               │ unified Event proto (oneof: audio | transcript | control)
+               │ gateway.proto (oneof: audio | control)
+               ▼
+┌─────────────────────────────────────┐
+│           GO ORCHESTRATOR           │
+│                                     │
+│  Session lifecycle, state machine,  │
+│  bidirectional duplex streaming,    │
+│  gateway.proto ↔ agent.proto relay  │
+│                                     │
+└──────────────┬──────────────────────┘
+               │ gRPC bidirectional stream
+               │ agent.proto (oneof: audio | transcript | control)
                ▼
 ┌─────────────────────────────────────┐
 │       PYTHON INFERENCE ENGINE       │
@@ -61,14 +75,16 @@ machine design, is documented in:
 │  Ollama qwen2.5:3b (LLM, GPU)       │
 │  Piper TTS (TTS, CPU)               │
 │  Dynamic agent profile injection    │
+│  Per-session conversation history   │
 │                                     │
 └─────────────────────────────────────┘
 ```
 
 The orchestrator never touches AI models. The inference engine never
-manages call lifecycle. Each is replaceable independently of the other.
+manages call lifecycle. AetherRTC never knows what an utterance is.
+Each tier is replaceable independently of the others.
 
-### Life-Cycle
+### Complete Lifecycle
 
 ```mermaid
 flowchart TB
@@ -84,8 +100,8 @@ flowchart TB
         Client["bridge/client.go"]
         StreamMgr["bridge/stream_manager.go"]
         PCMOut["PCMOutboundChan"]
-        EncodeStub["EncodeUlaw — NOT BUILT"]
-        OutTrack["Outbound RTP track — NOT WIRED"]
+        Encode["EncodeUlaw — g117.go"]
+        OutTrack["TrackLocalStaticSample"]
     end
 
     subgraph OrchGo["Orchestrator-Go :50052"]
@@ -93,7 +109,7 @@ flowchart TB
         Sess["session.go — Session state machine"]
     end
 
-    subgraph Python[" Inference-Python :50051"]
+    subgraph Python["Inference-Python :50051"]
         VAD["Silero VAD"]
         STT["Faster-Whisper"]
         LLM["Qwen2.5:3b"]
@@ -103,7 +119,7 @@ flowchart TB
     Mic --> PC
     PC == "WebRTC / G.711" ==> Sig
     Sig --> Peer
-    Peer -- "OnTrack decode" --> PCMIn
+    Peer -- "OnTrack → DecodeUlaw" --> PCMIn
     PCMIn --> Client
     Client --> StreamMgr
     StreamMgr == "gateway.proto StreamAudio" ==> GwServer
@@ -111,33 +127,37 @@ flowchart TB
     Sess == "agent.proto StreamEvents" ==> VAD
     VAD --> STT --> LLM --> TTS
 
-    TTS -. "agent.proto response" .-> Sess
-    Sess -. "gateway.proto response" .-> StreamMgr
-    StreamMgr -. "writes" .-> PCMOut
-    PCMOut -.-> EncodeStub
-    EncodeStub -.-> OutTrack
-    OutTrack -. "playback — NOT BUILT" .-> PC
+    TTS -- "agent.proto response" --> Sess
+    Sess -- "gateway.proto response" --> StreamMgr
+    StreamMgr -- "writes" --> PCMOut
+    PCMOut --> Encode
+    Encode -- "WriteSample 20ms frames" --> OutTrack
+    OutTrack -- "RTP playback" --> PC
 
     classDef built fill:#1a3a1a,stroke:#4caf50,color:#fff
-    classDef pending fill:#3a2a1a,stroke:#c97d3a,stroke-dasharray: 4 4,color:#fff
-
-    class Mic,PC,Sig,Peer,PCMIn,Client,StreamMgr,GwServer,Sess,VAD,STT,LLM,TTS built
-    class PCMOut,EncodeStub,OutTrack pending
+    class Mic,PC,Sig,Peer,PCMIn,Client,StreamMgr,GwServer,Sess,VAD,STT,LLM,TTS,PCMOut,Encode,OutTrack built
 ```
 
 ---
 
 ## Companion Project: AetherRTC (Edge Media Gateway)
 
-Currently, the orchestrator routes local `.wav` files for testing. To bring this runtime to the public web without polluting the orchestration logic with complex network protocols, a companion project is actively being developed: **[AetherRTC](https://github.com/Adityarya11/atherRTC)**.
+**[AetherRTC](https://github.com/Adityarya11/aetherRTC)** is a standalone
+WebRTC Edge Media Gateway built in Go (using Pion). It is independently
+deployable and speaks only `gateway.proto` — it has no knowledge of VAR's
+internal AI pipeline. Its sole responsibilities:
 
-AetherRTC is a standalone WebRTC Edge Media Gateway built in Go (using Pion). It acts as the "front door" for the Voice Agent Runtime by:
+- Terminate public WebRTC connections (SDP negotiation, ICE traversal,
+  DTLS handshakes, SRTP).
+- Force G.711/PCMU at the edge — avoids CGO Opus dependency, enables
+  pure-Go audio handling.
+- Decode G.711 to raw PCM, forward over `gateway.proto` to the orchestrator.
+- Receive PCM response audio from the orchestrator, encode back to G.711,
+  write to the browser's outbound RTP track.
 
-- Terminating public WebRTC connections (SDP negotiation, ICE traversal, DTLS handshakes).
-- Handling all media codecs at the edge (forcing G.711/PCMU to avoid heavy Opus CGO decoding).
-- Streaming clean, raw PCM audio bytes directly into the Voice Orchestrator via an internal gRPC bridge.
-
-This 3-tier service mesh design ensures the Voice Agent Runtime remains strictly focused on AI orchestration and session state, entirely ignorant of how the audio arrived. With VAD now integrated, the orchestrator no longer needs to send an explicit end-of-utterance signal — AetherRTC can forward a continuous live audio stream and the inference engine derives utterance boundaries on its own.
+The three-tier design ensures VAR remains strictly focused on AI orchestration
+and session state. AetherRTC can be pointed at any backend that implements
+the `Gateway` gRPC service — it is not coupled to VAR specifically.
 
 ---
 
@@ -164,18 +184,29 @@ accidental.
 - [x] gRPC bidirectional stream between Go orchestrator and Python inference engine
 - [x] Full STT → LLM → TTS inference pipeline running locally, no external API calls
 - [x] Dynamic agent profiling — system prompts flow from YAML configs through the proto contract into the LLM at session start
+- [x] Per-session conversation history — LLM maintains context across all utterances within a single call
 - [x] Session state machine in Go with mutex-protected, validated transitions, hardened with a `sync.Once` guard against concurrent completion signals
 - [x] Token-streaming LLM responses with sentence-boundary chunking — TTS begins synthesizing the first sentence while the LLM is still generating later sentences
 - [x] True bidirectional duplex — the gRPC stream stays open across utterance boundaries with no `CloseSend()`, verified with sequential multi-utterance sessions and zero audio bleeding
 - [x] VAD-gated utterance boundary detection — a four-state debounce machine over Silero VAD (ONNX) replaces explicit boundary signals, with a lookback buffer and max-duration safeguard, validated against false starts, sustained speech, and cross-utterance state persistence
+- [x] AetherRTC three-tier integration — full end-to-end pipeline: browser microphone → WebRTC → AetherRTC → Orchestrator-Go → Inference-Python → TTS response → browser speaker, verified with real browser sessions and audible response audio
+- [x] `gateway.proto` contract with sample rate negotiation at `START_SESSION` — AetherRTC declares `source_sample_rate: 8000`, Python's `AudioPreprocessor` resamples accordingly
+- [x] G.711 µ-law encode/decode — `DecodeUlaw` (inbound RTP → PCM) and `EncodeUlaw` (PCM → outbound RTP) both implemented and verified
+- [x] Outbound audio pacing — 20ms frame reframing with ticker-gated `WriteSample` to prevent RTP bursting to the browser
 
-## What's in progress
+## What's in progress / next
 
-- [ ] Removing the manual `END_OF_UTTERANCE` override from the Go test harness now that VAD is independently validated
-- [ ] Monitor goroutine for barge-in handling, timeout detection, and context cancellation
-- [ ] AetherRTC WebRTC bridge connecting live browser audio to the orchestrator
-- [ ] Removal of the temp-file boundary in Python STT in favor of true streaming transcription
+- [ ] Milestone 6: full lifecycle verification — connect, speak multiple utterances, disconnect cleanly, confirm no goroutine leaks, confirm single `session_id` traces through all three services' logs
+- [ ] Monitor goroutine in Orchestrator-Go — context cancellation, session timeout, `InterruptChan` for barge-in support
 - [ ] A recorded end-to-end demo
+
+## Deferred (tracked, not forgotten)
+
+- Barge-in (depends on monitor goroutine)
+- Jitter buffer and drop-oldest backpressure policy in AetherRTC
+- TURN server configuration for real-world NAT traversal (STUN-only today)
+- Concurrent ordered utterance processing
+- Phase 2: tool calling, RAG, MCP integration (explicitly out of scope until Phase 1 is stable)
 
 ---
 
@@ -184,9 +215,10 @@ accidental.
 ```text
 voice-runtime/
 ├── proto/
-│   └── agent.proto              # Unified Event contract (audio | transcript | control)
+│   ├── agent.proto              # VAR internal contract (audio | transcript | control)
+│   └── gateway.proto            # AetherRTC ↔ Orchestrator contract (audio | gateway control)
 ├── services/
-│   ├── orchestrator-go/         # Control plane — session lifecycle, gRPC client
+│   ├── orchestrator-go/         # Control plane — session lifecycle, gateway server, gRPC relay
 │   └── inference-py/            # Data plane — VAD, STT, LLM, TTS pipeline
 ├── configs/
 │   └── agent_profiles/          # YAML-defined agent personas
@@ -195,7 +227,8 @@ voice-runtime/
 │   ├── LLD.md
 │   ├── true_duplex.md
 │   ├── vad.md
-│   └── backlog.md               # Detailed engineering log and architectural debt tracker
+│   ├── three-tier-architecture.md
+│   └── backlog.md
 └── test_data/                   # Sample input/output audio for local testing
 ```
 
@@ -203,6 +236,27 @@ Service-specific setup and run instructions:
 
 - [`services/orchestrator-go/README.md`](services/orchestrator-go/README.md)
 - [`services/inference-py/README.md`](services/inference-py/README.md)
+
+---
+
+## Running the full stack
+
+Start in this order — each service must be up before the next:
+
+```bash
+# Terminal 1 — Inference engine
+cd services/inference-py
+uv run python main.py
+
+# Terminal 2 — Orchestrator-Go gateway server
+cd services/orchestrator-go
+go run ./cmd/gateway-server -profile receptionist -port :50052 -inference localhost:50051
+
+# Terminal 3 — AetherRTC (separate repo)
+go run ./cmd/gateway/main.go
+
+# Browser — open index.html, click Start Call
+```
 
 ---
 
