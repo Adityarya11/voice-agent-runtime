@@ -99,7 +99,7 @@ func main() {
 	logInfo("Profile loaded: %s", agentConfig.Name)
 
 	conn, err := grpc.NewClient(
-		"localhost:50051",
+		"passthrough:///localhost:50051",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

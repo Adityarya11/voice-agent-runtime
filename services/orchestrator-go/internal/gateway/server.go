@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	agentpb "voice-runtime/orchestrator-go/generated"
 	gatewaypb "voice-runtime/orchestrator-go/generated/gateway"
 	"voice-runtime/orchestrator-go/internal/config"
@@ -24,17 +25,29 @@ type Server struct {
 func NewServer(profile *config.AgentProfile, inferenceAddr string) (*Server, error) {
 
 	conn, err := grpc.NewClient(
-		inferenceAddr,
+		dialTarget(inferenceAddr),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: failed to connect to inference engine: %v", err)
 	}
 
+	conn.Connect()
+
 	return &Server{
 		Profile: profile,
 		conn:    conn,
 	}, nil
+}
+
+// grpc.NewClient defaults to the dns resolver, which blocks the first RPC on a
+// TXT lookup for service config that can take over ten seconds to fail. These
+// targets are always a literal host:port, so dial them directly.
+func dialTarget(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "passthrough:///" + addr
 }
 
 func (s *Server) StreamAudio(stream gatewaypb.Gateway_StreamAudioServer) error {
