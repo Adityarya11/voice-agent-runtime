@@ -22,7 +22,7 @@ func main() {
 	sessionID := flag.String("session", "gateway_test_001", "Session ID")
 	flag.Parse()
 
-	conn, err := grpc.NewClient(*gatewayAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///"+*gatewayAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Failed to connect to gateway: %v", err)
 	}
