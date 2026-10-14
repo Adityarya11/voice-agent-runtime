@@ -85,4 +85,6 @@ services/inference-py/models
 
 test_data
 
+docs/benchmarks/latest/
+
 temp
