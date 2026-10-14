@@ -1,10 +1,12 @@
 import io
+import json
 import logging
 import os
 import queue
 import signal
 import sys
 import threading
+import time
 import wave
 from collections.abc import Generator
 from concurrent import futures
@@ -90,8 +92,22 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
         logger.info("All inference modules loaded.")
 
     def _run_utterance(self, ctx: SessionContext, utterance_bytes: bytes) -> None:
+        bench = {
+            "session_id": ctx.session_id,
+            "stt_s": None,
+            "stt_text": None,
+            "first_sentence_s": None,
+            "first_audio_s": None,
+            "tts_s": 0.0,
+            "tts_audio_s": 0.0,
+            "sentences": 0,
+            "completed": False,
+        }
+        started = time.perf_counter()
         try:
             user_text = self.transcriber.transcribe(utterance_bytes)
+            bench["stt_s"] = time.perf_counter() - started
+            bench["stt_text"] = user_text
 
             if not user_text:
                 logger.warning(
@@ -108,6 +124,8 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 history=ctx.conversation_history,
             ):
                 assistant_parts.append(sentence)
+                if bench["first_sentence_s"] is None:
+                    bench["first_sentence_s"] = time.perf_counter() - started
                 if not ctx.grpc_context.is_active():
                     logger.warning(
                         f"[{ctx.session_id}] gRPC context cancelled mid-utterance. "
@@ -115,7 +133,9 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                     )
                     return
 
+                synth_started = time.perf_counter()
                 wav_bytes = self.tts.synthesize(sentence)
+                bench["tts_s"] += time.perf_counter() - synth_started
                 if not wav_bytes:
                     logger.warning(
                         f"[{ctx.session_id}] TTS returned empty bytes for: '{sentence}'"
@@ -123,6 +143,8 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                     continue
 
                 pcm_bytes = wav_to_pcm16_mono(wav_bytes)
+                bench["tts_audio_s"] += len(pcm_bytes) / 2 / TTS_OUTPUT_SAMPLE_RATE
+                bench["sentences"] += 1
 
                 for i in range(0, len(pcm_bytes), CHUNK_SIZE):
                     chunk = pcm_bytes[i : i + CHUNK_SIZE]
@@ -132,6 +154,8 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                             audio=agent_pb2.AudioChunk(data=chunk),
                         )
                     )
+                    if bench["first_audio_s"] is None:
+                        bench["first_audio_s"] = time.perf_counter() - started
 
             if assistant_parts:
                 ctx.conversation_history.extend(
@@ -142,6 +166,7 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 )
                 ctx.conversation_history = ctx.conversation_history[-12:]
 
+            bench["completed"] = True
             logger.info(f"[{ctx.session_id}] Utterance response complete.")
 
         except grpc.RpcError as e:
@@ -153,6 +178,8 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 f"[{ctx.session_id}] Inference runtime failure: {e}", exc_info=True
             )
         finally:
+            bench["total_s"] = time.perf_counter() - started
+            logger.info("BENCH " + json.dumps(bench))
             ctx.utterance_done_event.set()
 
     def _dispatch_utterance(self, ctx: SessionContext, vad: VADDetector) -> None:
@@ -180,7 +207,10 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                 ctx.outbound_queue.put(_SHUTDOWN)
                 return
 
-            self._run_utterance(ctx, utterance_bytes)
+            try:
+                self._run_utterance(ctx, utterance_bytes)
+            except Exception:
+                logger.exception(f"[{ctx.session_id}] Unhandled error in utterance worker.")
 
     def _handle_control_event(
         self, ctx: SessionContext, vad: VADDetector, control: agent_pb2.ControlSignal
@@ -247,9 +277,13 @@ class VoiceAgentServicer(agent_pb2_grpc.VoiceAgentServicer):
                     self._handle_audio_event(ctx, vad, preprocessor, event.audio)
 
         except grpc.RpcError as e:
-            logger.error(
-                f"[{ctx.session_id}] gRPC stream error in read pump: {e}", exc_info=True
-            )
+            if ctx.grpc_context.is_active():
+                logger.error(
+                    f"[{ctx.session_id}] gRPC stream error in read pump: {e}",
+                    exc_info=True,
+                )
+            else:
+                logger.info(f"[{ctx.session_id}] Client disconnected.")
         finally:
             logger.info(
                 f"[{ctx.session_id}] Inbound stream closed. Signaling shutdown."
