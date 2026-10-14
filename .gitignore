@@ -83,6 +83,12 @@ Thumbs.db
 
 services/inference-py/models
 
-test_data
+test_data/*
+!test_data/bench/
+
+docs/benchmarks/latest/*.log
+docs/benchmarks/latest/*.csv
+docs/benchmarks/latest/*.txt
+docs/benchmarks/latest/*.exe
 
 temp
