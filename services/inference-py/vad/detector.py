@@ -1,9 +1,9 @@
-import enum 
-import os
 import collections
+import enum
+import os
 
-import onnxruntime as ort 
 import numpy as np
+import onnxruntime as ort
 
 
 class VADState(enum.Enum):
@@ -12,20 +12,29 @@ class VADState(enum.Enum):
     SPEECH = "SPEECH"
     SPEECH_ENDING = "SPEECH_ENDING"
 
+
 class VADCommand(enum.Enum):
     NONE = "NONE"
     START_SPEECH = "START_SPEECH"
     END_OF_UTTERANCE = "END_OF_UTTERANCE"
 
 
-class VADDetector: 
-
+class VADDetector:
     FRAME_SIZE = 512
     SAMPLE_RATE = 16000
 
     FRAME_DURATION_MS = FRAME_SIZE / SAMPLE_RATE * 1000
 
-    def __init__(self, model_path: str, threshold: float = 0.5, min_speech_duration: float = 250, min_silence_duration: float = 500, lookback_ms: float = 320, max_utterance_sec: float = 15.0):
+    def __init__(
+        self,
+        model_path: str,
+        threshold: float = 0.5,
+        min_speech_duration: float = 250,
+        min_silence_duration: float = 500,
+        lookback_ms: float = 320,
+        max_utterance_sec: float = 15.0,
+        max_dip_frames: int = 0,
+    ):
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Silero VAD model not found at: {model_path}")
@@ -34,9 +43,17 @@ class VADDetector:
         self._sr = np.array(self.SAMPLE_RATE, dtype=np.int64)
 
         self.threshold = threshold
-        self._min_speech_frames = max(1, round(min_speech_duration / self.FRAME_DURATION_MS))
-        self._min_silence_frames = max(1, round(min_silence_duration / self.FRAME_DURATION_MS))
-        self._max_utterance_frames = round(max_utterance_sec * 1000 / self.FRAME_DURATION_MS)
+        self._min_speech_frames = max(
+            1, round(min_speech_duration / self.FRAME_DURATION_MS)
+        )
+        self._min_silence_frames = max(
+            1, round(min_silence_duration / self.FRAME_DURATION_MS)
+        )
+        self._max_utterance_frames = round(
+            max_utterance_sec * 1000 / self.FRAME_DURATION_MS
+        )
+        self._max_dip_frames = max_dip_frames
+        self._dip_frame_count = 0
 
         # Persists across utterances within a session; reset() is for
         # session boundaries only, not per-utterance.
@@ -52,10 +69,11 @@ class VADDetector:
         self._pending_frames: list = []
         self._utterance_frames: list = []
 
-
-    def process_frames(self, frame: np.ndarray) -> VADCommand: 
-        if frame.shape != (self.FRAME_SIZE,): 
-            raise ValueError(f"Expected frame of shape({self.FRAME_SIZE},), got {frame.shape}")
+    def process_frames(self, frame: np.ndarray) -> VADCommand:
+        if frame.shape != (self.FRAME_SIZE,):
+            raise ValueError(
+                f"Expected frame of shape({self.FRAME_SIZE},), got {frame.shape}"
+            )
 
         score, self._state = self._infer(frame)
         is_speech = score > self.threshold
@@ -68,7 +86,7 @@ class VADDetector:
             return self._handle_speech(frame, is_speech)
         if self._vad_state == VADState.SPEECH_ENDING:
             return self._handle_speech_ending(frame, is_speech)
- 
+
         raise RuntimeError(f"Unhandled VAD state: {self._vad_state}")
 
     def _handle_silence(self, frame: np.ndarray, is_speech: bool) -> VADCommand:
@@ -76,21 +94,27 @@ class VADDetector:
             self._vad_state = VADState.SPEECH_STARTING
             self._pending_frames = list(self._lookback)
             self._speech_frame_count = 1
+            self._dip_frame_count = 0
             self._pending_frames.append(frame)
         else:
             self._lookback.append(frame)
         return VADCommand.NONE
 
-    def _handle_speech_starting(self, frame: np.ndarray, is_speech: bool) -> VADCommand: 
-        if not is_speech: 
-            self._vad_state = VADState.SILENCE
-            self._pending_frames = []
+    def _handle_speech_starting(self, frame: np.ndarray, is_speech: bool) -> VADCommand:
+        if not is_speech:
+            self._dip_frame_count += 1
+            if self._dip_frame_count > self._max_dip_frames:
+                self._vad_state = VADState.SILENCE
+                self._pending_frames = []
+                return VADCommand.NONE
+            self._pending_frames.append(frame)
             return VADCommand.NONE
 
+        self._dip_frame_count = 0
         self._speech_frame_count += 1
         self._pending_frames.append(frame)
 
-        if self._speech_frame_count >= self._min_speech_frames: 
+        if self._speech_frame_count >= self._min_speech_frames:
             self._vad_state = VADState.SPEECH
             self._utterance_frames = self._pending_frames
             self._pending_frames = []
@@ -127,9 +151,9 @@ class VADDetector:
             return VADCommand.END_OF_UTTERANCE
         return VADCommand.NONE
 
-    def get_utterance_frames(self) -> np.ndarray: 
+    def get_utterance_frames(self) -> np.ndarray:
 
-        if not self._utterance_frames: 
+        if not self._utterance_frames:
             return np.array([], dtype=np.float32)
 
         audio = np.concatenate(self._utterance_frames)
@@ -142,13 +166,16 @@ class VADDetector:
         self._vad_state = VADState.SILENCE
         self._speech_frame_count = 0
         self._silence_frame_count = 0
+        self._dip_frame_count = 0
         self._lookback.clear()
         self._pending_frames = []
         self._utterance_frames = []
 
     def _infer(self, frame: np.ndarray) -> tuple:
-        outputs = self._session.run(None, {
-                "input": frame.reshape(1, self.FRAME_SIZE), 
+        outputs = self._session.run(
+            None,
+            {
+                "input": frame.reshape(1, self.FRAME_SIZE),
                 "sr": self._sr,
                 "state": self._state,
             },
